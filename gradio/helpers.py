@@ -21,6 +21,7 @@ from gradio_client import utils as client_utils
 from gradio_client.documentation import document
 
 from gradio import components, oauth, processing_utils, routes, utils
+from gradio.caching import Cache, resolve_generator
 from gradio.context import Context, LocalContext, get_blocks_context
 from gradio.data_classes import GradioModel, GradioRootModel
 from gradio.events import Dependency, EventData
@@ -138,7 +139,7 @@ class Examples:
             run_on_click: if cache_examples is False, clicking on an example does not run the function when an example is clicked. Set this to True to run the function when an example is clicked. Has no effect if cache_examples is True.
             preprocess: if True, preprocesses the example input before running the prediction function and caching the output. Only applies if `cache_examples` is not False.
             postprocess: if True, postprocesses the example output after running the prediction function and before caching. Only applies if `cache_examples` is not False.
-            api_visibility: Controls the visibility of the event associated with clicking on the examples. Can be "public" (shown in API docs and callable), "private" (hidden from API docs and not callable), or "undocumented" (hidden from API docs but callable).
+            api_visibility: Controls the visibility of the event associated with clicking on the examples. Can be "public" (shown in API docs and callable), "private" (hidden from API docs and not callable by the Gradio client libraries), or "undocumented" (hidden from API docs but callable).
             api_name: Defines how the event associated with clicking on the examples appears in the API docs. Can be a string or None. If set to a string, the endpoint will be exposed in the API docs with the given name. If None, an auto-generated name will be used.
             api_description: Description of the event associated with clicking on the examples in the API docs. Can be a string, None, or False. If set to a string, the endpoint will be exposed in the API docs with the given description. If None, the function's docstring will be used as the API endpoint description. If False, then no description will be displayed in the API docs.
             batch: If True, then the function should process a batch of inputs, meaning that it should accept a list of input values for each parameter. Used only if cache_examples is not False.
@@ -523,29 +524,10 @@ class Examples:
         else:
             print(f"Caching examples at: '{utils.abspath(self.cached_folder)}'")
             self.cache_logger.setup(self.outputs, self.cached_folder)  # type: ignore
-            generated_values = []
-            if inspect.isgeneratorfunction(self.fn):
-
-                def get_final_item(*args):  # type: ignore
-                    x = None
-                    generated_values.clear()
-                    for x in self.fn(*args):  # noqa: B007  # type: ignore
-                        generated_values.append(x)
-                    return x
-
-                fn = get_final_item
-            elif inspect.isasyncgenfunction(self.fn):
-
-                async def get_final_item(*args):
-                    x = None
-                    generated_values.clear()
-                    async for x in self.fn(*args):  # noqa: B007  # type: ignore
-                        generated_values.append(x)
-                    return x
-
-                fn = get_final_item
-            else:
-                fn = self.fn
+            assert self.fn is not None  # noqa: S101
+            fn, generated_values = resolve_generator(self.fn)
+            if generated_values is None:
+                generated_values = []
 
             # create a fake dependency to process the examples and get the predictions
             from gradio.events import EventListenerMethod
@@ -972,6 +954,9 @@ def special_args(
         type_hint = type_hints.get(param.name)
         if isinstance(param.default, Progress):
             progress_index = i
+            if inputs is not None:
+                inputs.insert(i, param.default)
+        elif isinstance(param.default, Cache):
             if inputs is not None:
                 inputs.insert(i, param.default)
         elif type_hint in (routes.Request, Optional[routes.Request]):

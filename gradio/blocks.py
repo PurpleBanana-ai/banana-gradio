@@ -41,6 +41,7 @@ from gradio import (
 )
 from gradio.block_function import BlockFunction
 from gradio.blocks_events import BLOCKS_EVENTS, BlocksEvents, BlocksMeta
+from gradio.caching import TrackManualCacheUsage, used_manual_cache
 from gradio.context import (
     Context,
     LocalContext,
@@ -68,6 +69,7 @@ from gradio.exceptions import (
     DuplicateBlockError,
     InvalidApiNameError,
     InvalidComponentError,
+    ShareCertificateWriteError,
 )
 from gradio.helpers import create_tracker, skip, special_args
 from gradio.i18n import I18n, I18nData
@@ -693,7 +695,7 @@ class BlocksConfig:
             trigger_mode: If "once" (default for all events except `.change()`) would not allow any submissions while an event is pending. If set to "multiple", unlimited submissions are allowed while pending, and "always_last" (default for `.change()` and `.key_up()` events) would allow a second submission after the pending event is complete.
             concurrency_limit: If set, this is the maximum number of this event that can be running simultaneously. Can be set to None to mean no concurrency_limit (any number of this event can be running simultaneously). Set to "default" to use the default concurrency limit (defined by the `default_concurrency_limit` parameter in `queue()`, which itself is 1 by default).
             concurrency_id: If set, this is the id of the concurrency group. Events with the same concurrency_id will be limited by the lowest set concurrency_limit.
-            api_visibility: controls the visibility and accessibility of this endpoint. Can be "public" (shown in API docs and callable by clients), "private" (hidden from API docs and not callable by clients), or "undocumented" (hidden from API docs but callable by clients and via gr.load). If fn is None, api_visibility will automatically be set to "private".
+            api_visibility: controls the visibility and accessibility of this endpoint. Can be "public" (shown in API docs and callable by clients), "private" (hidden from API docs and not callable by the Gradio client libraries), or "undocumented" (hidden from API docs but callable by clients and via gr.load). If fn is None, api_visibility will automatically be set to "private".
             is_cancel_function: whether this event cancels another running event.
             connection: The connection format, either "sse" or "stream".
             time_limit: The time limit for the function to run. Parameter only used for the `.stream()` event.
@@ -1771,11 +1773,14 @@ Received inputs:
                     inputs[i].get("value", None) if is_prop_input else inputs[i]
                 )
 
-                inputs_cached = await processing_utils.async_move_files_to_cache(
-                    value_to_process,
-                    block,
-                    check_in_upload_folder=not explicit_call,
-                )
+                from gradio.profiling import trace_phase
+
+                async with trace_phase("preprocess_move_to_cache"):
+                    inputs_cached = await processing_utils.async_move_files_to_cache(
+                        value_to_process,
+                        block,
+                        check_in_upload_folder=not explicit_call,
+                    )
                 if getattr(block, "data_model", None) and inputs_cached is not None:
                     data_model = cast(
                         Union[GradioModel, GradioRootModel], block.data_model
@@ -1793,7 +1798,9 @@ Received inputs:
                 state._update_value_in_config(block._id, inputs_serialized)
 
                 if block_fn.preprocess:
-                    processed_value = block.preprocess(inputs_cached)
+                    processed_value = await anyio.to_thread.run_sync(
+                        block.preprocess, inputs_cached, limiter=self.limiter
+                    )
                 else:
                     processed_value = inputs_serialized
 
@@ -1855,6 +1862,8 @@ Received inputs:
         predictions: list | dict,
         state: SessionState | None,
     ) -> list[Any]:
+        from gradio.profiling import trace_phase
+
         state = state or SessionState(self)
         if (
             isinstance(predictions, dict)
@@ -1943,33 +1952,36 @@ Received inputs:
                         )
                     if block._id in state:
                         block = state[block._id]
-                    prediction_value = block.postprocess(prediction_value)
+                    prediction_value = await anyio.to_thread.run_sync(
+                        block.postprocess, prediction_value, limiter=self.limiter
+                    )
                     if isinstance(prediction_value, (GradioModel, GradioRootModel)):
                         prediction_value_serialized = prediction_value.model_dump()
                     else:
                         prediction_value_serialized = prediction_value
-                    prediction_value_serialized = (
-                        await processing_utils.async_move_files_to_cache(
-                            prediction_value_serialized,
-                            block,
-                            postprocess=True,
+                    async with trace_phase("postprocess_update_state_in_config"):
+                        prediction_value_serialized = (
+                            await processing_utils.async_move_files_to_cache(
+                                prediction_value_serialized,
+                                block,
+                                postprocess=True,
+                            )
                         )
-                    )
-                    if block._id not in state:
-                        state[block._id] = block
-                    state._update_value_in_config(
-                        block._id, prediction_value_serialized
-                    )
+                        if block._id not in state:
+                            state[block._id] = block
+                        state._update_value_in_config(
+                            block._id, prediction_value_serialized
+                        )
                 elif not block_fn.postprocess:
                     if block._id not in state:
                         state[block._id] = block
                     state._update_value_in_config(block._id, prediction_value)
-
-                outputs_cached = await processing_utils.async_move_files_to_cache(
-                    prediction_value,
-                    block,
-                    postprocess=True,
-                )
+                async with trace_phase("postprocess_move_to_cache"):
+                    outputs_cached = await processing_utils.async_move_files_to_cache(
+                        prediction_value,
+                        block,
+                        postprocess=True,
+                    )
                 output.append(outputs_cached)
 
         return output
@@ -2111,6 +2123,7 @@ Received inputs:
             max_batch_size = block_fn.max_batch_size
             batch_sizes = [len(inp) for inp in inputs]
             batch_size = batch_sizes[0]
+            manual_cache_used = False
             if inspect.isasyncgenfunction(block_fn.fn) or inspect.isgeneratorfunction(
                 block_fn.fn
             ):
@@ -2127,16 +2140,18 @@ Received inputs:
                 await self.preprocess_data(block_fn, list(i), state, explicit_call)
                 for i in zip(*inputs, strict=False)
             ]
-            result = await self.call_function(
-                block_fn,
-                list(zip(*inputs, strict=False)),
-                None,
-                request,
-                event_id,
-                event_data,
-                in_event_listener,
-                state,
-            )
+            with TrackManualCacheUsage():
+                result = await self.call_function(
+                    block_fn,
+                    list(zip(*inputs, strict=False)),
+                    None,
+                    request,
+                    event_id,
+                    event_data,
+                    in_event_listener,
+                    state,
+                )
+                manual_cache_used = used_manual_cache()
             preds = result["prediction"]
             data = [
                 await self.postprocess_data(block_fn, list(o), state)
@@ -2147,26 +2162,36 @@ Received inputs:
             data = list(zip(*data, strict=False))
             is_generating, iterator = None, None
         else:
+            from gradio.profiling import trace_phase
+
             old_iterator = iterator
+            manual_cache_used = False
             if old_iterator:
                 inputs = []
             else:
-                inputs = await self.preprocess_data(
-                    block_fn, inputs, state, explicit_call
-                )
+                async with trace_phase("preprocess"):
+                    inputs = await self.preprocess_data(
+                        block_fn, inputs, state, explicit_call
+                    )
             was_generating = old_iterator is not None
-            result = await self.call_function(
-                block_fn,
-                inputs,
-                old_iterator,
-                request,
-                event_id,
-                event_data,
-                in_event_listener,
-                state,
-            )
+            with TrackManualCacheUsage():
+                async with trace_phase("fn_call"):
+                    result = await self.call_function(
+                        block_fn,
+                        inputs,
+                        old_iterator,
+                        request,
+                        event_id,
+                        event_data,
+                        in_event_listener,
+                        state,
+                    )
+                manual_cache_used = used_manual_cache()
 
-            data = await self.postprocess_data(block_fn, result["prediction"], state)
+            async with trace_phase("postprocess"):
+                data = await self.postprocess_data(
+                    block_fn, result["prediction"], state
+                )
             if state:
                 changed_state_ids = [
                     state_id
@@ -2181,33 +2206,40 @@ Received inputs:
             is_generating, iterator = result["is_generating"], result["iterator"]
             if is_generating or was_generating:
                 run = id(old_iterator) if was_generating else id(iterator)
-                data = await self.handle_streaming_outputs(
-                    block_fn,
-                    data,
-                    session_hash=session_hash,
-                    run=run,
-                    root_path=root_path,
-                    final=not is_generating,
-                )
-                data = self.handle_streaming_diffs(
-                    block_fn,
-                    data,
-                    session_hash=session_hash,
-                    run=run,
-                    final=not is_generating,
-                    simple_format=simple_format,
-                )
+                async with trace_phase("streaming_diff"):
+                    data = await self.handle_streaming_outputs(
+                        block_fn,
+                        data,
+                        session_hash=session_hash,
+                        run=run,
+                        root_path=root_path,
+                        final=not is_generating,
+                    )
+                    data = self.handle_streaming_diffs(
+                        block_fn,
+                        data,
+                        session_hash=session_hash,
+                        run=run,
+                        final=not is_generating,
+                        simple_format=simple_format,
+                    )
 
-        block_fn.total_runtime += result["duration"]
-        block_fn.total_runs += 1
+        if not manual_cache_used:
+            block_fn.total_runtime += result["duration"]
+            block_fn.total_runs += 1
         output = {
             "data": data,
             "is_generating": is_generating,
             "iterator": iterator,
             "duration": result["duration"],
-            "average_duration": block_fn.total_runtime / block_fn.total_runs,
+            "average_duration": (
+                block_fn.total_runtime / block_fn.total_runs
+                if block_fn.total_runs > 0
+                else None
+            ),
             "render_config": None,
             "changed_state_ids": changed_state_ids,
+            "used_cache": "partial" if manual_cache_used else None,
         }
         if block_fn.renderable and state:
             output["render_config"] = state.blocks_config.get_config(
@@ -2301,7 +2333,7 @@ Received inputs:
         }
         config.update(self.default_config.get_config())  # type: ignore
         config["connect_heartbeat"] = utils.connect_heartbeat(
-            config, self.blocks.values()
+            config, self.blocks.values(), self.fns.values()
         )
         return config
 
@@ -2512,6 +2544,7 @@ Received inputs:
         ssr_mode: bool | None = None,
         pwa: bool | None = None,
         mcp_server: bool | None = None,
+        _app: App | None = None,
         _frontend: bool = True,
         i18n: I18n | None = None,
         theme: Theme | str | None = None,
@@ -2712,6 +2745,7 @@ Received inputs:
 
         self.server_app = self.app = App.create_app(
             self,
+            app=_app,
             auth_dependency=auth_dependency,
             app_kwargs=app_kwargs,
             strict_cors=strict_cors,
@@ -2861,6 +2895,8 @@ Received inputs:
                     print(
                         f"\nCould not create share link. Checksum mismatch for file: {BINARY_PATH}."
                     )
+                elif isinstance(e, ShareCertificateWriteError):
+                    print(f"\nCould not create share link. {e}")
                 elif Path(BINARY_PATH).exists():
                     print(
                         "\nCould not create share link. Please check your internet connection or our status page: https://status.gradio.app."

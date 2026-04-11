@@ -1,5 +1,45 @@
 # @gradio/image
 
+## 0.26.2
+
+### Fixes
+
+- [#13181](https://github.com/gradio-app/gradio/pull/13181) [`755c3d3`](https://github.com/gradio-app/gradio/commit/755c3d32c388a36d2296f8d895c5c0e1144fb54f) - fix: show validation errors on StatusTracker-dependent components.  Thanks @hysts!
+
+### Dependency updates
+
+- @gradio/atoms@0.23.1
+- @gradio/statustracker@0.14.0
+- @gradio/client@2.2.0
+
+## 0.26.1
+
+### Fixes
+
+- [#13165](https://github.com/gradio-app/gradio/pull/13165) [`1a0e277`](https://github.com/gradio-app/gradio/commit/1a0e2770067789ba6ec5646e473e1df183cd7183) - Use test utils.  Thanks @freddyaboulton!
+
+### Dependency updates
+
+- @gradio/utils@0.12.2
+- @gradio/atoms@0.23.0
+- @gradio/statustracker@0.13.1
+- @gradio/upload@0.17.8
+
+## 0.26.0
+
+### Features
+
+- [#12998](https://github.com/gradio-app/gradio/pull/12998) [`d5e1b8f`](https://github.com/gradio-app/gradio/commit/d5e1b8f6cb7473b70fc8c082589996d5e0402810) - use a real browser environment for unit tests.  Thanks @pngwn!
+
+### Fixes
+
+- [#13004](https://github.com/gradio-app/gradio/pull/13004) [`73d4065`](https://github.com/gradio-app/gradio/commit/73d4065db6a75961693fad60dd26e8dbaa2a56d1) - fix(image): pass onclick to FullscreenButton in ImagePreview.  Thanks @galleon!
+
+### Dependency updates
+
+- @gradio/utils@0.12.1
+- @gradio/statustracker@0.13.0
+
 ## 0.25.4
 
 ### Dependency updates

@@ -258,6 +258,7 @@ class SpacesReloader(ServerReloader):
     def swap_blocks(self, demo: "Blocks"):
         super().swap_blocks(demo)
         demo.config = demo.get_config_file()
+        demo.server = self.get_attribute("server", demo)
 
 
 class SourceFileReloader(ServerReloader):
@@ -867,8 +868,17 @@ class SyncToAsyncIterator:
             run_sync_iterator_async, self.iterator, limiter=self.limiter
         )
 
-    def aclose(self):
-        self.iterator.close()
+    async def aclose(self, timeout=60.0, retry_interval=0.05):
+        start = time.monotonic()
+        while True:
+            try:
+                self.iterator.close()
+                break
+            except ValueError as e:
+                if "already executing" in str(e) and time.monotonic() - start < timeout:
+                    await asyncio.sleep(retry_interval)
+                else:
+                    raise
 
 
 async def async_iteration(iterator):
@@ -1131,7 +1141,10 @@ def get_type_hints(fn):
         fn = fn.__call__
     else:
         return {}
-    return typing.get_type_hints(fn)
+    try:
+        return typing.get_type_hints(fn)
+    except (NameError, TypeError):
+        return {}
 
 
 def is_special_typed_parameter(name, parameter_types):
@@ -1584,15 +1597,17 @@ def _parse_file_size(size: str | int | None) -> int | None:
     return multiple * size_int
 
 
-def connect_heartbeat(config: BlocksConfigDict, blocks) -> bool:
+def connect_heartbeat(config: BlocksConfigDict, blocks, fns=None) -> bool:
     """
     Determines whether a heartbeat is required for a given config.
     """
+    from gradio.caching import Cache
     from gradio.components import State
 
     any_state = any(isinstance(block, State) for block in blocks)
     any_unload = False
     any_stream = False
+    any_per_session_cache = False
 
     if "dependencies" not in config:
         raise ValueError(
@@ -1609,7 +1624,28 @@ def connect_heartbeat(config: BlocksConfigDict, blocks) -> bool:
                     any_stream = True
         if any_unload and any_stream:
             break
-    return any_state or any_unload or any_stream
+
+    if fns is not None:
+        for block_fn in fns:
+            fn = getattr(block_fn, "fn", None)
+            if fn is None:
+                continue
+            cache_store = getattr(fn, "cache", None)
+            if getattr(cache_store, "_per_session", False):
+                any_per_session_cache = True
+                break
+            try:
+                signature = inspect.signature(fn)
+            except (TypeError, ValueError):
+                continue
+            if any(
+                isinstance(param.default, Cache) and param.default._store._per_session
+                for param in signature.parameters.values()
+            ):
+                any_per_session_cache = True
+                break
+
+    return any_state or any_unload or any_stream or any_per_session_cache
 
 
 def deep_hash(obj):
@@ -1928,28 +1964,13 @@ def get_function_description(fn: Callable) -> tuple[str, dict[str, str], list[st
     return description, parameters, returns
 
 
-async def safe_aclose_iterator(iterator, timeout=60.0, retry_interval=0.05):
+async def safe_aclose_iterator(iterator):
     """
-    Safely close generators by calling the aclose method.
-    Sync generators are tricky because if you call `aclose` while the loop is running
-    then you get a ValueError and the generator will not shut down gracefully.
-    So the solution is to retry calling the aclose method until we succeed (with timeout).
+    Safely close an async iterator by calling its aclose method.
+    For SyncToAsyncIterator, the retry logic for "generator already executing"
+    is handled in SyncToAsyncIterator.aclose() itself.
     """
-    start = time.monotonic()
-    if isinstance(iterator, SyncToAsyncIterator):
-        while True:
-            try:
-                iterator.aclose()
-                break
-            except ValueError as e:
-                if "already executing" in str(e):
-                    if time.monotonic() - start > timeout:
-                        raise
-                    await asyncio.sleep(retry_interval)
-                else:
-                    raise
-    else:
-        iterator.aclose()
+    await iterator.aclose()
 
 
 def set_default_buttons(

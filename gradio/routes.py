@@ -13,7 +13,6 @@ import json
 import math
 import mimetypes
 import os
-import platform
 import secrets
 import sys
 import time
@@ -21,7 +20,6 @@ import traceback
 import warnings
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
-from queue import Empty as EmptyQueue
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -65,6 +63,7 @@ from starlette.responses import RedirectResponse
 
 import gradio
 from gradio import (
+    caching,
     ranged_response,
     route_utils,
     themes,
@@ -126,6 +125,7 @@ from gradio.utils import (
     get_node_path,
     get_package_version,
     get_upload_folder,
+    safe_aclose_iterator,
 )
 
 if TYPE_CHECKING:
@@ -430,6 +430,7 @@ class App(FastAPI):
     @staticmethod
     def create_app(
         blocks: gradio.Blocks,
+        app: App | None = None,
         app_kwargs: dict[str, Any] | None = None,
         auth_dependency: Callable[[fastapi.Request], str | None] | None = None,
         strict_cors: bool = True,
@@ -442,10 +443,15 @@ class App(FastAPI):
         mcp_subpath = App.setup_mcp_server(blocks, app_kwargs, mcp_server)
 
         delete_cache = blocks.delete_cache or (None, None)
-        app_kwargs["lifespan"] = create_lifespan_handler(
-            app_kwargs.get("lifespan", None), *delete_cache
-        )
-        app = App(auth_dependency=auth_dependency, **app_kwargs, debug=debug)
+        if app is None:
+            app_kwargs["lifespan"] = create_lifespan_handler(
+                app_kwargs.get("lifespan", None), *delete_cache
+            )
+            app = App(auth_dependency=auth_dependency, **app_kwargs, debug=debug)
+        else:
+            app.router.lifespan_context = create_lifespan_handler(
+                app_kwargs.get("lifespan", None), *delete_cache
+            )
         if blocks.mcp_server_obj:
             blocks.mcp_server_obj.launch_mcp_on_sse(app, mcp_subpath, blocks.root_path)
         router = APIRouter(prefix=API_PREFIX)
@@ -1304,6 +1310,7 @@ class App(FastAPI):
                         # This will mark the state to be deleted in an hour
                         if session_hash in app.state_holder.session_data:
                             app.state_holder.session_data[session_hash].is_closed = True
+                        caching.clear_session_caches(session_hash)
                         for (
                             event_id
                         ) in app.get_blocks()._queue.pending_event_ids_session.get(
@@ -1448,6 +1455,10 @@ class App(FastAPI):
                 ].put_nowait(message)
             if body.event_id in app.iterators:
                 async with app.lock:
+                    try:
+                        await safe_aclose_iterator(app.iterators[body.event_id])
+                    except Exception:
+                        pass
                     del app.iterators[body.event_id]
                     app.iterators_to_reset.add(body.event_id)
             return {"success": True}
@@ -1493,13 +1504,24 @@ class App(FastAPI):
             process_msg: Callable[[EventMessage], str | None],
         ):
             blocks = app.get_blocks()
+            heartbeat_rate = 15
+
+            async def heartbeat():
+                while blocks.is_running:
+                    await asyncio.sleep(heartbeat_rate)
+                    # It's possible the event has finished by the time
+                    # the heartbeat wakes up
+                    queue = blocks._queue.pending_messages_per_session.get(session_hash)
+                    if queue:
+                        await queue.put(HeartbeatMessage())
 
             async def sse_stream(request: fastapi.Request):
+                heartbeat_task = asyncio.create_task(heartbeat())
                 try:
-                    last_heartbeat = time.perf_counter()
                     while True:
                         if await request.is_disconnected():
                             await blocks._queue.clean_events(session_hash=session_hash)
+                            heartbeat_task.cancel()
                             return
 
                         if (
@@ -1510,23 +1532,14 @@ class App(FastAPI):
                                 status_code=status.HTTP_404_NOT_FOUND,
                             )
 
-                        heartbeat_rate = 15
-                        check_rate = 0.05 if platform.system() == "Windows" else 0.001
                         message = None
                         try:
                             messages = blocks._queue.pending_messages_per_session[
                                 session_hash
                             ]
-                            message = messages.get_nowait()
-                        except EmptyQueue:
-                            await asyncio.sleep(check_rate)
-                            if time.perf_counter() - last_heartbeat > heartbeat_rate:
-                                # Fix this
-                                message = HeartbeatMessage()
-                                # Need to reset last_heartbeat with perf_counter
-                                # otherwise only a single hearbeat msg will be sent
-                                # and then the stream will retry leading to infinite queue 😬
-                                last_heartbeat = time.perf_counter()
+                            message = await asyncio.wait_for(messages.get(), timeout=10)
+                        except (TimeoutError, asyncio.TimeoutError):
+                            pass
 
                         if blocks._queue.stopped:
                             message = UnexpectedErrorMessage(
@@ -1570,6 +1583,7 @@ class App(FastAPI):
                                     response = process_msg(message)
                                     if response is not None:
                                         yield response
+                                    heartbeat_task.cancel()
                                     return
                 except BaseException as e:
                     message = UnexpectedErrorMessage(
@@ -1582,6 +1596,7 @@ class App(FastAPI):
                         await blocks._queue.clean_events(session_hash=session_hash)
                     if response is not None:
                         yield response
+                    heartbeat_task.cancel()
                     raise e
 
             return StreamingResponse(
@@ -1734,12 +1749,29 @@ class App(FastAPI):
                 media_type="text/event-stream",
             )
 
+        def set_upload_trace(session_hash: str, start: float):
+            import uuid
+
+            from gradio.profiling import PROFILING_ENABLED, RequestTrace, collector
+
+            if PROFILING_ENABLED:
+                trace = RequestTrace(
+                    event_id=str(uuid.uuid4()),
+                    fn_name="gradio_file_upload",
+                    session_hash=session_hash,
+                )
+                trace.upload_ms = (time.monotonic() - start) * 1000
+                collector.add(trace)
+
         @router.post("/upload", dependencies=[Depends(login_check)])
         async def upload_file(
             request: fastapi.Request,
             bg_tasks: BackgroundTasks,
             upload_id: str | None = None,
         ):
+            start = None
+            if PROFILING_ENABLED:
+                start = time.monotonic()
             content_type_header = request.headers.get("Content-Type")
             content_type: bytes
             content_type, _ = parse_options_header(content_type_header or "")
@@ -1804,6 +1836,11 @@ class App(FastAPI):
                 bg_tasks.add_task(
                     move_uploaded_files_to_cache, files_to_copy, locations
                 )
+            if PROFILING_ENABLED:
+                bg_tasks.add_task(
+                    set_upload_trace, request.headers.get("session_hash", ""), start
+                )
+
             return output_files
 
         @router.get("/startup-events")
@@ -2341,6 +2378,26 @@ Existing code:
                         os.unlink(file)
                 except Exception as e:
                     print(f"Error cleaning up file {file}: {str(e)}")
+
+        from gradio.profiling import PROFILING_ENABLED
+
+        if PROFILING_ENABLED:
+            from gradio.profiling import collector
+
+            @router.get("/profiling/traces")
+            async def profiling_traces(
+                last_n: int | None = None,
+            ):
+                return ORJSONResponse(collector.get_all(last_n=last_n))
+
+            @router.get("/profiling/summary")
+            async def profiling_summary():
+                return ORJSONResponse(collector.get_summary())
+
+            @router.post("/profiling/clear")
+            async def profiling_clear():
+                collector.clear()
+                return ORJSONResponse({"status": "cleared"})
 
         app.include_router(router)
         return app

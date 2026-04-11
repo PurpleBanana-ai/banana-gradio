@@ -1,5 +1,38 @@
 # @gradio/audio
 
+## 0.23.2
+
+### Dependency updates
+
+- @gradio/atoms@0.23.1
+- @gradio/statustracker@0.14.0
+- @gradio/client@2.2.0
+
+## 0.23.1
+
+### Features
+
+- [#13167](https://github.com/gradio-app/gradio/pull/13167) [`a4e1c92`](https://github.com/gradio-app/gradio/commit/a4e1c92c11e05bee332ff69e19b533fbd9abc840) - Audio and Video unit tests.  Thanks @freddyaboulton!
+
+### Dependency updates
+
+- @gradio/utils@0.12.2
+- @gradio/atoms@0.23.0
+- @gradio/statustracker@0.13.1
+- @gradio/upload@0.17.8
+
+## 0.23.0
+
+### Features
+
+- [#13021](https://github.com/gradio-app/gradio/pull/13021) [`5c4dc6a`](https://github.com/gradio-app/gradio/commit/5c4dc6aca11575cf4fec6704afd48a54664f983f) - add core themes.  Thanks @hannahblair!
+
+### Dependency updates
+
+- @gradio/utils@0.12.1
+- @gradio/statustracker@0.13.0
+- @gradio/button@0.6.6
+
 ## 0.22.4
 
 ### Dependency updates

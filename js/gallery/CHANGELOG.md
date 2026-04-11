@@ -1,5 +1,46 @@
 # @gradio/gallery
 
+## 0.17.6
+
+### Features
+
+- [#13213](https://github.com/gradio-app/gradio/pull/13213) [`457f130`](https://github.com/gradio-app/gradio/commit/457f130b310ac087fdc6ba7dbbc7fa78e0bcccf8) - Gallery Unit Tests.  Thanks @freddyaboulton!
+
+### Dependency updates
+
+- @gradio/atoms@0.23.1
+- @gradio/statustracker@0.14.0
+- @gradio/client@2.2.0
+- @gradio/image@0.26.2
+- @gradio/file@0.14.7
+- @gradio/video@0.20.7
+
+## 0.17.5
+
+### Fixes
+
+- [#13178](https://github.com/gradio-app/gradio/pull/13178) [`d815881`](https://github.com/gradio-app/gradio/commit/d815881739689f45f5387ea52cc92e2cddf8adcf) - fix(gallery): prevent incorrect selected_index clamping on image append.  Thanks @Gopesh111!
+
+### Dependency updates
+
+- @gradio/utils@0.12.2
+- @gradio/atoms@0.23.0
+- @gradio/statustracker@0.13.1
+- @gradio/upload@0.17.8
+- @gradio/image@0.26.1
+- @gradio/video@0.20.6
+- @gradio/file@0.14.6
+
+## 0.17.4
+
+### Dependency updates
+
+- @gradio/utils@0.12.1
+- @gradio/statustracker@0.13.0
+- @gradio/image@0.26.0
+- @gradio/video@0.20.5
+- @gradio/file@0.14.5
+
 ## 0.17.3
 
 ### Dependency updates

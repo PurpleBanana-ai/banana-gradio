@@ -1,6 +1,6 @@
 {
 	"name": "@self/tootils",
-	"version": "0.10.0",
+	"version": "0.13.0",
 	"description": "Internal test utilities",
 	"type": "module",
 	"main": "src/index.ts",
@@ -17,7 +17,9 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./render": "./src/render.ts",
-		"./app-launcher": "./src/app-launcher.ts"
+		"./shared-prop-tests": "./src/shared-prop-tests.ts",
+		"./app-launcher": "./src/app-launcher.ts",
+		"./download-command": "./src/download-command.ts"
 	},
 	"scripts": {
 		"package": "svelte-package --input=. --tsconfig=../../tsconfig.json"

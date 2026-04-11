@@ -49,12 +49,19 @@ test("Test event/selection data can trigger render", async ({ page }) => {
 });
 
 test("Test examples work in render", async ({ page }) => {
-	await page.getByRole("button", { name: "test" }).click();
-	await expect(page.getByLabel("input", { exact: true })).toHaveValue("test");
-	await page.getByRole("button", { name: "def", exact: true }).click();
-	await expect(page.getByLabel("little textbox", { exact: true })).toHaveValue(
-		"def"
-	);
+	const input = page.getByLabel("input", { exact: true });
+	await input.waitFor();
+	const testButton = page.getByRole("button", { name: "test" });
+	await testButton.waitFor();
+	await testButton.click();
+	await expect(input).toHaveValue("test", { timeout: 10000 });
+
+	const little_textbox = page.getByLabel("little textbox", { exact: true });
+	await little_textbox.waitFor();
+	const defButton = page.getByRole("button", { name: "def", exact: true });
+	await defButton.waitFor();
+	await defButton.click();
+	await expect(little_textbox).toHaveValue("def", { timeout: 10000 });
 });
 
 test("Test keyed event listeners in render", async ({ page }) => {

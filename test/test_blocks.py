@@ -157,6 +157,32 @@ class TestBlocksMethods:
             assert difference >= 0.01
             assert result
 
+    @pytest.mark.asyncio
+    async def test_process_api_average_duration_excludes_manual_cache_hits(self):
+        def double(x, c=gr.Cache()):
+            hit = c.get(x)
+            if hit is not None:
+                return hit["value"]
+            time.sleep(0.02)
+            value = x * 2
+            c.set(x, value=value)
+            return value
+
+        with gr.Blocks() as demo:
+            text = gr.Number()
+            output = gr.Number()
+            button = gr.Button()
+            button.click(double, [text], [output])
+
+        first = await demo.process_api(inputs=[3], block_fn=0, state=None)
+        second = await demo.process_api(inputs=[3], block_fn=0, state=None)
+
+        assert first["used_cache"] is None
+        assert second["used_cache"] == "partial"
+        assert first["average_duration"] is not None
+        assert second["average_duration"] == pytest.approx(first["average_duration"])
+        assert demo.fns[0].total_runs == 1
+
     @patch("gradio.analytics._do_analytics_request")
     def test_initiated_analytics(self, mock_anlaytics, monkeypatch):
         monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "True")
@@ -1458,6 +1484,48 @@ class TestCancel:
                 cancel = gr.Button(value="Cancel")
                 cancel.click(None, None, None, cancels=[click])
             demo.queue().launch(prevent_thread_lock=True)
+
+    def test_cancel_closes_generator(self):
+        """The /cancel endpoint must call close() on server-side generators."""
+        from gradio.routes import App
+        from gradio.utils import SyncToAsyncIterator
+
+        closed = []
+
+        def gen():
+            try:
+                while True:
+                    yield "running"
+            finally:
+                closed.append(True)
+
+        with gr.Blocks() as demo:
+            out = gr.Textbox()
+            btn = gr.Button()
+            btn.click(gen, None, out, api_name="predict")
+
+        app = App.create_app(demo)
+
+        event_id = "test_event"
+        g = gen()
+        next(g)  # advance so GeneratorExit/finally will fire on close
+        iterator = SyncToAsyncIterator(g, limiter=None)
+        app.iterators[event_id] = iterator
+
+        client = TestClient(app)
+        resp = client.post(
+            f"{API_PREFIX}/cancel",
+            json={
+                "session_hash": "test",
+                "fn_index": 0,
+                "event_id": event_id,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["success"]
+        assert closed, "Generator was not closed by /cancel endpoint"
+        assert event_id not in app.iterators
+        assert event_id in app.iterators_to_reset
 
 
 class TestGetAPIInfo:

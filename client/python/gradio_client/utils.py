@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import pkgutil
+import re
 import secrets
 import shutil
 import tempfile
@@ -66,6 +67,13 @@ INVALID_RUNTIME = [
     SpaceStage.RUNTIME_ERROR,
     SpaceStage.PAUSED,
 ]
+
+# Characters forbidden in filenames across OS and shell environments:
+# < > : " / \ | ? *  – forbidden on Windows
+# \x00-\x1f           – null byte and ASCII control characters
+# \x7f                – DEL character
+# ` $ ! { }           – shell-dangerous characters
+_FORBIDDEN_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f`$!{}]')
 
 
 class Message(TypedDict, total=False):
@@ -735,17 +743,18 @@ def decode_base64_to_binary(encoding: str) -> tuple[bytes, str | None]:
 
 def strip_invalid_filename_characters(filename: str, max_bytes: int = 200) -> str:
     """
-    Strips invalid characters from a filename and ensures it does not exceed the maximum byte length
-    Invalid characters are any characters that are not alphanumeric or one of the following: . _ - ,
-    The filename may include an extension (in which case it is preserved exactly as is), or could be just a name without an extension.
+    Strips invalid characters from a filename and ensures it does not exceed the maximum byte length.
+    Only removes characters that are truly dangerous for file systems: path separators,
+    null bytes, control characters, and shell-dangerous characters. Preserves all other
+    characters including parentheses, brackets, unicode characters, etc.
+    The filename may include an extension (in which case it is preserved exactly as is),
+    or could be just a name without an extension.
     """
     name, ext = os.path.splitext(filename)
-    name = "".join([char for char in name if char.isalnum() or char in "._-, "])
+    name = _FORBIDDEN_RE.sub("", name)
     # Also sanitize the extension (excluding the leading dot)
     if ext:
-        ext = "." + "".join(
-            [char for char in ext[1:] if char.isalnum() or char in "._-"]
-        )
+        ext = "." + _FORBIDDEN_RE.sub("", ext[1:])
     # If the stem was stripped entirely but an extension exists, use a
     # fallback name so that the extension is not mistaken for a dotfile
     # stem (e.g. "#.txt" → ".txt" → Path(".txt").suffix == "").
@@ -960,11 +969,12 @@ def _json_schema_to_python_type(schema: Any, defs) -> str:
             elements = _json_schema_to_python_type(items, defs)
             return f"list[{elements}]"
     elif type_ == "object":
+        props = schema.get("properties", {})
+        if _is_file_schema(schema, defs or {}):
+            return "filepath"
 
         def get_desc(v):
             return f" ({v.get('description')})" if v.get("description") else ""
-
-        props = schema.get("properties", {})
 
         des = [
             f"{n}: {_json_schema_to_python_type(v, defs)}{get_desc(v)}"
@@ -1160,8 +1170,54 @@ async def async_traverse(
 
 
 def value_is_file(api_info: dict) -> bool:
-    info = _json_schema_to_python_type(api_info, api_info.get("$defs"))
-    return any(file_data_format in info for file_data_format in FILE_DATA_FORMATS)
+    return _schema_contains_file(api_info, api_info.get("$defs", {}))
+
+
+def _resolve_ref(schema: dict, defs: dict) -> dict:
+    """Resolve a $ref to its definition."""
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        if ref_name in defs:
+            return defs[ref_name]
+    return schema
+
+
+def _is_file_schema(schema: dict, defs: dict | None = None) -> bool:
+    """Check if a schema directly represents a file type (has path + meta with gradio.FileData)."""
+    if defs is None:
+        defs = schema.get("$defs", {})
+    props = schema.get("properties", {})
+    if "path" not in props or "meta" not in props:
+        return False
+    meta = _resolve_ref(props["meta"], defs)
+    meta_props = meta.get("properties", {})
+    if "_type" in meta_props:
+        type_schema = meta_props["_type"]
+        return type_schema.get("const") == "gradio.FileData"
+    meta_default = meta.get("default", {})
+    if isinstance(meta_default, dict):
+        return meta_default.get("_type") == "gradio.FileData"
+    return False
+
+
+def _schema_contains_file(schema, defs: dict) -> bool:
+    """Recursively check if a JSON schema contains a file type anywhere."""
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return any(_schema_contains_file(item, defs) for item in schema)
+        return False
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        if ref_name in defs:
+            return _schema_contains_file(defs[ref_name], defs)
+        return False
+    if _is_file_schema(schema, defs):
+        return True
+    return any(
+        _schema_contains_file(v, defs)
+        for k, v in schema.items()
+        if k != "$defs" and isinstance(v, (dict, list))
+    )
 
 
 def is_filepath(s) -> bool:

@@ -1,5 +1,18 @@
 # @gradio/utils
 
+## 0.12.2
+
+### Features
+
+- [#13167](https://github.com/gradio-app/gradio/pull/13167) [`a4e1c92`](https://github.com/gradio-app/gradio/commit/a4e1c92c11e05bee332ff69e19b533fbd9abc840) - Audio and Video unit tests.  Thanks @freddyaboulton!
+
+## 0.12.1
+
+### Fixes
+
+- [#12566](https://github.com/gradio-app/gradio/pull/12566) [`7760161`](https://github.com/gradio-app/gradio/commit/7760161258abe6329b754dd6d2511fc3b61fed95) - Fix custom components in SSR Mode + Custom Component Examples.  Thanks @freddyaboulton!
+- [#13028](https://github.com/gradio-app/gradio/pull/13028) [`30af84c`](https://github.com/gradio-app/gradio/commit/30af84cdd100855999281de8720cbb6d58b48556) - Browser tests follow-up.  Thanks @pngwn!
+
 ## 0.12.0
 
 ### Features
