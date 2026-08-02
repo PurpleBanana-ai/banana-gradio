@@ -1,5 +1,40 @@
 # @self/tootils
 
+## 0.16.0
+
+### Features
+
+- [#13329](https://github.com/gradio-app/gradio/pull/13329) [`7ac583a`](https://github.com/gradio-app/gradio/commit/7ac583a38a4c995d172033ff6e3700390201ff21) - Make builds go zoom zoom.  Thanks @pngwn!
+
+### Dependency updates
+
+- @gradio/utils@0.14.0
+- @gradio/statustracker@0.15.2
+
+## 0.15.0
+
+### Dependency updates
+
+- @gradio/statustracker@0.15.1
+
+## 0.15.0
+
+### Features
+
+- [#13526](https://github.com/gradio-app/gradio/pull/13526) [`53cb4ca`](https://github.com/gradio-app/gradio/commit/53cb4cae1ec3521e9170d12867253516413ba37a) - Run `pnpm lint` and `pnpm ts:check` on CI.  Thanks @abidlabs!
+
+### Dependency updates
+
+- @gradio/statustracker@0.15.0
+- @gradio/utils@0.13.0
+
+## 0.14.0
+
+### Features
+
+- [#13348](https://github.com/gradio-app/gradio/pull/13348) [`d7c4cad`](https://github.com/gradio-app/gradio/commit/d7c4cadd8fdd5205ae544d57ca001fb32b2aae5a) - fix(e2e): plug gradio-app leaks in playwright test harness, and stop spurious ECONNRESETs from aborting the free-port scan.  Thanks @pngwn!
+- [#13348](https://github.com/gradio-app/gradio/pull/13348) [`d7c4cad`](https://github.com/gradio-app/gradio/commit/d7c4cadd8fdd5205ae544d57ca001fb32b2aae5a) - fix(e2e): plug gradio-app leaks in playwright test harness.  Thanks @pngwn!
+
 ## 0.13.0
 
 ### Dependency updates

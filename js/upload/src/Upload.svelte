@@ -3,7 +3,7 @@
 	import type { FileData } from "@gradio/client";
 	import { prepare_files, type Client } from "@gradio/client";
 	import UploadProgress from "./UploadProgress.svelte";
-	import { create_drag } from "./utils";
+	import { create_drag, is_valid_mimetype } from "./utils";
 
 	const { drag, open_file_upload: _open_file_upload } = create_drag();
 
@@ -49,8 +49,8 @@
 		icon_upload?: boolean;
 		height?: number | string | undefined;
 		aria_label?: string | undefined;
-		upload_promise?: Promise<(FileData | null)[]>;
-		onload?: (data: FileData | FileData[] | Blob | File) => void;
+		upload_promise?: Promise<(FileData | null)[]> | null;
+		onload?: (data: any) => void;
 		onerror?: (error: string) => void;
 		children?: import("svelte").Snippet;
 	} = $props();
@@ -59,7 +59,7 @@
 		_open_file_upload();
 	}
 
-	let upload_id: string = "";
+	let upload_id = "";
 	let file_data: FileData[];
 	let accept_file_types: string | null = $state(null);
 	let use_post_upload_validation: boolean | null = null;
@@ -141,14 +141,19 @@
 		uploading = true;
 		upload_promise = new Promise(async (resolve) => {
 			try {
-				const _file_data = await upload(
-					file_data,
-					root,
-					upload_id,
-					max_file_size ?? Infinity
-				);
-				onload?.(file_count === "single" ? _file_data?.[0] : _file_data);
-				resolve(_file_data || []);
+				const _file_data =
+					(await upload(
+						file_data,
+						root,
+						upload_id,
+						max_file_size ?? Infinity
+					)) || [];
+				if (file_count === "single") {
+					if (_file_data[0] !== undefined) onload?.(_file_data[0]);
+				} else {
+					onload?.(_file_data);
+				}
+				resolve(_file_data);
 				uploading = false;
 			} catch (e) {
 				onerror?.((e as Error).message);
@@ -158,40 +163,6 @@
 		});
 
 		return upload_promise;
-	}
-
-	function is_valid_mimetype(
-		file_accept: string | string[] | null,
-		uploaded_file_extension: string,
-		uploaded_file_type: string
-	): boolean {
-		if (
-			!file_accept ||
-			file_accept === "*" ||
-			file_accept === "file/*" ||
-			(Array.isArray(file_accept) &&
-				file_accept.some((accept) => accept === "*" || accept === "file/*"))
-		) {
-			return true;
-		}
-		let acceptArray: string[];
-		if (typeof file_accept === "string") {
-			acceptArray = file_accept.split(",").map((s) => s.trim());
-		} else if (Array.isArray(file_accept)) {
-			acceptArray = file_accept;
-		} else {
-			return false;
-		}
-
-		return (
-			acceptArray.includes(uploaded_file_extension) ||
-			acceptArray.some((type) => {
-				const [category] = type.split("/").map((s) => s.trim());
-				return (
-					type.endsWith("/*") && uploaded_file_type.startsWith(category + "/")
-				);
-			})
-		);
 	}
 
 	export async function load_files(

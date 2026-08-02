@@ -78,7 +78,7 @@
 	});
 
 	$effect(() => {
-		set_doc(value);
+		set_doc(value ?? "");
 	});
 
 	update_lines();

@@ -1,5 +1,97 @@
 # website
 
+## 0.80.1
+
+### Fixes
+
+- [#13692](https://github.com/gradio-app/gradio/pull/13692) [`3676c45`](https://github.com/gradio-app/gradio/commit/3676c45acfc12456de097996fe5adab2132e2d30) - publish the `Prism` global before its grammar files load, so the docs pages stop failing to hydrate with `ReferenceError: Prism is not defined`.  Thanks @abidlabs!
+
+### Dependency updates
+
+- @gradio/paramviewer@0.12.0
+
+## 0.80.0
+
+### Features
+
+- [#13329](https://github.com/gradio-app/gradio/pull/13329) [`7ac583a`](https://github.com/gradio-app/gradio/commit/7ac583a38a4c995d172033ff6e3700390201ff21) - Make builds go zoom zoom.  Thanks @pngwn!
+
+### Fixes
+
+- [#13640](https://github.com/gradio-app/gradio/pull/13640) [`d833d9a`](https://github.com/gradio-app/gradio/commit/d833d9add10925d74dfcbd8fdc9686132c6fa458) - fall back to the custom component backup dataset when the gallery API is unavailable.  Thanks @dawoodkhan82!
+
+### Dependency updates
+
+- @gradio/statustracker@0.15.2
+- @gradio/tabs@0.10.0
+- @gradio/html@0.13.2
+- @gradio/tabitem@0.8.3
+- @gradio/code@0.19.0
+- @gradio/paramviewer@0.11.0
+- @gradio/button@0.8.2
+
+## 0.79.0
+
+### Features
+
+- [#13547](https://github.com/gradio-app/gradio/pull/13547) [`370725b`](https://github.com/gradio-app/gradio/commit/370725bb433b15da0c303be8eb04638dc3100b26) - website build: add fallback to unversioned templates.  Thanks @hannahblair!
+
+### Dependency updates
+
+- @gradio/tabs@0.9.0
+- @gradio/html@0.13.1
+- @gradio/code@0.18.1
+- @gradio/statustracker@0.15.1
+- @gradio/paramviewer@0.10.1
+- @gradio/button@0.8.1
+- @gradio/tabitem@0.8.2
+
+## 0.78.1
+
+### Dependency updates
+
+- @gradio/statustracker@0.15.0
+- @gradio/button@0.8.0
+- @gradio/code@0.18.0
+- @gradio/html@0.13.0
+- @gradio/paramviewer@0.10.0
+- @gradio/tabs@0.8.0
+- @gradio/tabitem@0.8.1
+
+## 0.78.0
+
+### Features
+
+- [#13504](https://github.com/gradio-app/gradio/pull/13504) [`a6141ee`](https://github.com/gradio-app/gradio/commit/a6141ee3ce8260a249a6230e18b14fcaa9b2ac4c) - Fix website build checks.  Thanks @abidlabs!
+
+### Dependency updates
+
+- @gradio/tabs@0.7.0
+- @gradio/button@0.7.0
+- @gradio/tabitem@0.8.0
+
+## 0.77.1
+
+### Fixes
+
+- [#13460](https://github.com/gradio-app/gradio/pull/13460) [`980db6c`](https://github.com/gradio-app/gradio/commit/980db6cc29b5e26a5f90334b0f4fd000b7443edc) - Offset guide heading anchors so the sticky header no longer covers the section title when clicking a table-of-contents link.  Thanks @ShirGanon!
+
+### Dependency updates
+
+- @gradio/tabs@0.6.0
+- @gradio/tabitem@0.7.0
+
+## 0.77.0
+
+### Features
+
+- [#13411](https://github.com/gradio-app/gradio/pull/13411) [`51497ae`](https://github.com/gradio-app/gradio/commit/51497ae8e5bab0ff5731d16df4148a024224cdf1) - add MiniMax ChatInterface example to the LLM providers guide.  Thanks @octo-patch!
+- [#13368](https://github.com/gradio-app/gradio/pull/13368) [`da45b72`](https://github.com/gradio-app/gradio/commit/da45b72da424ad77e55a2ca99375dbda9eb1c5b3) - add embedded workflow to docs.  Thanks @hannahblair!
+
+### Dependency updates
+
+- @gradio/html@0.12.4
+
 ## 0.76.0
 
 ### Features

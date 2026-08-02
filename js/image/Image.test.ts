@@ -326,6 +326,83 @@ describe("Props: buttons (static mode)", () => {
 		expect(getByLabelText("Fullscreen")).toBeTruthy();
 	});
 
+	test("clicking the fullscreen button toggles fullscreen in interactive mode", async () => {
+		const { getByLabelText } = await render(Image, {
+			...default_props,
+			interactive: true,
+			value: fake_value,
+			buttons: ["fullscreen"]
+		});
+
+		await fireEvent.click(getByLabelText("Fullscreen"));
+		await waitFor(() => {
+			expect(getByLabelText("Exit fullscreen mode")).toBeVisible();
+		});
+
+		await fireEvent.click(getByLabelText("Exit fullscreen mode"));
+		await waitFor(() => {
+			expect(getByLabelText("Fullscreen")).toBeVisible();
+		});
+	});
+
+	test("fullscreen block does not extend beneath the window scrollbar", async () => {
+		// Reserve a 16px scrollbar gutter so the window scrollbar takes layout
+		// space, as classic (non-overlay) scrollbars do on Windows (#11982).
+		// The box-sizing rule mirrors the app's global reset.css, which is not
+		// loaded in the test environment.
+		const style = document.createElement("style");
+		style.textContent =
+			"html { scrollbar-gutter: stable; } ::-webkit-scrollbar { width: 16px; } * { box-sizing: border-box; }";
+		document.head.appendChild(style);
+		const filler = document.createElement("div");
+		filler.style.height = "5000px";
+		document.body.appendChild(filler);
+		// A fixed element spanning left:0/right:0 measures the visible viewport
+		// width, which excludes the scrollbar gutter.
+		const probe = document.createElement("div");
+		probe.style.cssText = "position: fixed; left: 0; right: 0; height: 1px;";
+		document.body.appendChild(probe);
+
+		try {
+			const visible_width = probe.getBoundingClientRect().width;
+			expect(visible_width).toBeLessThan(window.innerWidth);
+
+			const { getByLabelText } = await render(Image, {
+				...default_props,
+				interactive: true,
+				value: fake_value,
+				buttons: ["fullscreen"]
+			});
+
+			await fireEvent.click(getByLabelText("Fullscreen"));
+			const block = await waitFor(() => {
+				const el = document.querySelector(".block.fullscreen");
+				expect(el).toBeTruthy();
+				// Wait out the pop-out animation: the block must have reached
+				// its final, (at least) full-viewport width before measuring.
+				expect(el?.getBoundingClientRect().width).toBeGreaterThanOrEqual(
+					visible_width - 1
+				);
+				return el as HTMLElement;
+			});
+
+			expect(block.getBoundingClientRect().right).toBeLessThanOrEqual(
+				visible_width
+			);
+			const wrapper = block.querySelector(
+				".icon-button-wrapper"
+			) as HTMLElement;
+			expect(wrapper).toBeTruthy();
+			expect(wrapper.getBoundingClientRect().right).toBeLessThanOrEqual(
+				visible_width
+			);
+		} finally {
+			style.remove();
+			filler.remove();
+			probe.remove();
+		}
+	});
+
 	test("empty buttons array shows no action buttons", async () => {
 		const { queryByLabelText } = await render(Image, {
 			...default_props,
@@ -633,6 +710,52 @@ describe("get_coordinates_of_clicked_image", () => {
 
 		const result = get_coordinates_of_clicked_image(evt);
 		expect(result).toEqual([100, 200]);
+	});
+
+	test("handles image shown at natural size with empty space on both axes", () => {
+		// `object-fit: scale-down` never upscales: a 100x100 natural image in
+		// a 400x300 box is drawn at natural size, centered at offset (150, 100).
+		// Click at (150, 100) = top-left corner of the drawn image.
+		const evt = make_mock_event(
+			150,
+			100,
+			{
+				naturalWidth: 100,
+				naturalHeight: 100
+			},
+			{
+				left: 0,
+				top: 0,
+				width: 400,
+				height: 300
+			}
+		);
+
+		const result = get_coordinates_of_clicked_image(evt);
+		expect(result).toEqual([0, 0]);
+	});
+
+	test("returns null when click is in the empty space around a natural-size image", () => {
+		// 100x100 natural image in a 1920x1080 box: drawn at natural size,
+		// centered at offset (910, 490). A click at (500, 540) is inside the
+		// box but left of the drawn image, so no image pixel is under it.
+		const evt = make_mock_event(
+			500,
+			540,
+			{
+				naturalWidth: 100,
+				naturalHeight: 100
+			},
+			{
+				left: 0,
+				top: 0,
+				width: 1920,
+				height: 1080
+			}
+		);
+
+		const result = get_coordinates_of_clicked_image(evt);
+		expect(result).toBeNull();
 	});
 
 	test("returns [NaN, NaN] when currentTarget is not an Element", () => {

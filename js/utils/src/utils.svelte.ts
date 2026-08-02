@@ -3,7 +3,8 @@ import type { Client } from "@gradio/client";
 import type { ComponentType, SvelteComponent } from "svelte";
 import { tick, untrack } from "svelte";
 import type { Component } from "svelte";
-import { locale } from "svelte-i18n";
+import { fromStore } from "svelte/store";
+import type { Readable } from "svelte/store";
 
 export const I18N_MARKER = "__i18n__";
 const TRANSLATABLE_PROPS = [
@@ -34,7 +35,7 @@ export interface SharedProps {
 	client: Client;
 	scale: number;
 	min_width: number;
-	padding: number;
+	padding: boolean;
 	load_component: load_component;
 	loading_status?: any;
 	label: string;
@@ -49,6 +50,10 @@ export interface SharedProps {
 		id: number,
 		set_data: (data: Record<string, any> & SharedProps) => void,
 		get_data: Function
+	) => void;
+	unregister_component: (
+		id: number,
+		set_data?: (data: Record<string, any> & SharedProps) => void
 	) => void;
 	dispatcher: Function;
 }
@@ -65,6 +70,8 @@ export interface ValueData {
 }
 
 export interface SelectData {
+	id?: string | number;
+	component_id?: string | number;
 	row_value?: any[];
 	col_value?: any[];
 	index: number | [number, number];
@@ -320,6 +327,7 @@ export const allowed_shared_props: (keyof SharedProps)[] = [
 	"container",
 	"attached_events",
 	"register_component",
+	"unregister_component",
 	"dispatcher"
 ] as const;
 
@@ -357,17 +365,35 @@ export class Gradio<T extends object = {}, U extends object = {}> {
 	shared: SharedProps = $state<SharedProps>({} as SharedProps) as SharedProps;
 	props = $state<U>({} as U) as U;
 	i18n: I18nFormatter = $state<any>((v: string) => v) as any;
+	// Live formatter store injected by @gradio/core (its canonical svelte-i18n
+	// instance). Used purely as a reactivity trigger to re-translate props when
+	// the locale changes. Kept off `props`/`$state` so it isn't proxied or
+	// serialized. See Blocks.svelte where this is set.
+	// NOTE: the underlying duplicate-svelte-i18n issue is also addressed by the
+	// workspace resolving to a single Svelte version (pinned to 5.48.0, since
+	// 5.56 regressed lazy-rendering); this injection remains as defense-in-depth.
+	i18n_store: Readable<unknown> | undefined;
+	_i18n_from_store: { readonly current: unknown } | undefined;
 	translatable_props: Record<string, string> = {};
 	dispatcher!: Function;
 	last_update: ReturnType<typeof tick> | null = null;
 	shared_props: (keyof SharedProps)[] = allowed_shared_props;
-	mounted: boolean = false;
+	mounted = false;
 	old_value: any;
 	register_component!: (
 		id: number,
 		set_data: (data: Record<string, any> & SharedProps) => void,
 		get_data: Function
 	) => void;
+	unregister_component!: (
+		id: number,
+		set_data?: (data: Record<string, any> & SharedProps) => void
+	) => void;
+	set_data_callback!: (data: Record<string, any> & SharedProps) => void;
+	get_data_callback!: Function;
+	registered_id: number | null = null;
+	last_shared_props!: SharedProps;
+	last_props!: U;
 
 	constructor(
 		_props: { shared_props: SharedProps; props: U },
@@ -378,6 +404,8 @@ export class Gradio<T extends object = {}, U extends object = {}> {
 			this.shared[key] = _props.shared_props[key];
 		}
 		for (const key in _props.props) {
+			// i18n_store is a store reference kept off `props`/`$state` (see below)
+			if (key === "i18n_store") continue;
 			// @ts-ignore same here
 			this.props[key] = _props.props[key];
 		}
@@ -390,8 +418,14 @@ export class Gradio<T extends object = {}, U extends object = {}> {
 				}
 			}
 		}
+
 		// @ts-ignore same here
 		this.i18n = this.props.i18n ?? ((v: string) => v);
+		// @ts-ignore - read the raw store reference before it's wrapped in $state
+		this.i18n_store = _props.props.i18n_store;
+		this._i18n_from_store = this.i18n_store
+			? fromStore(this.i18n_store)
+			: undefined;
 
 		for (const key of TRANSLATABLE_PROPS) {
 			// @ts-ignore
@@ -413,44 +447,78 @@ export class Gradio<T extends object = {}, U extends object = {}> {
 		this.load_component = this.shared.load_component;
 
 		this.register_component = this.shared.register_component || (() => {});
+		this.unregister_component = this.shared.unregister_component || (() => {});
 		this.dispatcher = this.shared.dispatcher || (() => {});
+		this.set_data_callback = this.set_data.bind(this);
+		this.get_data_callback = this.get_data.bind(this);
 
 		this.register_component(
-			_props.shared_props.id,
+			this.shared.id,
 			// @ts-ignore
-			this.set_data.bind(this),
-			this.get_data.bind(this)
+			this.set_data_callback,
+			this.get_data_callback
 		);
+		this.registered_id = this.shared.id;
+		this.last_shared_props = _props.shared_props;
+		this.last_props = _props.props;
 
+		// @gr.render may reuse a Svelte component instance for a node with
+		// a new Gradio id. Register callbacks under that id, while leaving
+		// prop updates to set_data/app-tree sync.
 		$effect(() => {
-			// Need to update the props here
-			// otherwise UI won't reflect latest state from render
-			for (const key in _props.shared_props) {
-				// @ts-ignore
-				if (this._is_i18n_managed(`shared.${key}`, _props.shared_props[key]))
-					continue;
-				// @ts-ignore i'm not doing pointless typescript gymanstics
-				this.shared[key] = _props.shared_props[key];
+			const current_id = _props.shared_props.id;
+			if (this.last_shared_props !== _props.shared_props) {
+				for (const key in _props.shared_props) {
+					// @ts-ignore
+					const value = _props.shared_props[key];
+					if (value === undefined) continue;
+					if (this._is_i18n_managed(`shared.${key}`, value)) continue;
+					// @ts-ignore i'm not doing pointless typescript gymanstics
+					this.shared[key] = value;
+				}
+				this.last_shared_props = _props.shared_props;
 			}
-			for (const key in _props.props) {
-				if (this._is_i18n_managed(`props.${key}`, _props.props[key])) continue;
-				// @ts-ignore same here
-				this.props[key] = _props.props[key];
+			if (this.last_props !== _props.props) {
+				for (const key in _props.props) {
+					// i18n_store is a store reference kept off `props`/`$state`
+					if (key === "i18n_store") continue;
+					const value = _props.props[key];
+					if (value === undefined) continue;
+					if (this._is_i18n_managed(`props.${key}`, value)) continue;
+					// @ts-ignore same here
+					this.props[key] = value;
+				}
+				this.last_props = _props.props;
+			}
+			if (this.registered_id !== null && this.registered_id !== current_id) {
+				this.unregister_component(this.registered_id, this.set_data_callback);
 			}
 			this.register_component(
-				_props.shared_props.id,
+				current_id,
 				// @ts-ignore
-				this.set_data.bind(this),
-				this.get_data.bind(this)
+				this.set_data_callback,
+				this.get_data_callback
 			);
+			this.registered_id = current_id;
 			untrack(() => {
-				this.shared.id = _props.shared_props.id;
+				this.shared.id = current_id;
 			});
 		});
 
-		// retranslate props when locale changes
-		if (Object.keys(this.translatable_props).length > 0) {
-			locale.subscribe(() => {
+		$effect(() => {
+			return () => {
+				if (this.registered_id !== null) {
+					this.unregister_component(this.registered_id, this.set_data_callback);
+				}
+			};
+		});
+
+		// Re-translate props when the locale changes at runtime. The store is
+		// injected by @gradio/core so we subscribe to the same svelte-i18n
+		// instance that actually receives locale updates.
+		$effect(() => {
+			if (!this.i18n_store) return;
+			const unsubscribe = this.i18n_store.subscribe(() => {
 				for (const [full_key, original] of Object.entries(
 					this.translatable_props
 				)) {
@@ -462,7 +530,8 @@ export class Gradio<T extends object = {}, U extends object = {}> {
 					else this.props[key] = translated;
 				}
 			});
-		}
+			return unsubscribe;
+		});
 	}
 
 	// check if props are translatable
@@ -488,11 +557,21 @@ export class Gradio<T extends object = {}, U extends object = {}> {
 		return translated;
 	}
 
+	// Reactive variant of `i18n`. Reading it inside a derived or template
+	// subscribes to the live locale store (via Svelte's createSubscriber), so
+	// the caller re-runs when the locale changes at runtime. The store is only
+	// the reactivity trigger; translation always goes through `this.i18n` so a
+	// custom formatter passed via props keeps taking effect.
+	live_i18n = (value: string): string => {
+		void this._i18n_from_store?.current;
+		return this.i18n(value);
+	};
+
 	dispatch<E extends keyof T>(event_name: E, data?: T[E]): void {
 		this.dispatcher(this.shared.id, event_name, data);
 	}
 
-	async get_data() {
+	async get_data(): Promise<any> {
 		return $state.snapshot(this.props);
 	}
 

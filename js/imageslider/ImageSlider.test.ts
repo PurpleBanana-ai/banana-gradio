@@ -110,6 +110,21 @@ describe("ImageSlider", () => {
 		expect(btns[0]).toBeVisible();
 	});
 
+	test("renders upload area when value is undefined", async () => {
+		const { getAllByRole, get_data } = await render(ImageSlider, {
+			...default_props,
+			interactive: true,
+			value: undefined,
+			client: mock_client()
+		});
+
+		const btns = getAllByRole("button", {
+			name: "Click to upload or drop files"
+		});
+		expect(btns[0]).toBeVisible();
+		expect((await get_data()).value).toEqual([null, null]);
+	});
+
 	test("renders both images when value has two images", async () => {
 		const { getAllByTestId } = await render(ImageSlider, {
 			...default_props,
@@ -343,6 +358,23 @@ describe("Props: buttons", () => {
 
 		expect(getByTestId("download-link")).toBeInTheDocument();
 		expect(getByLabelText("Fullscreen")).toBeVisible();
+	});
+
+	test("clicking the fullscreen button toggles fullscreen mode", async () => {
+		const { getByLabelText } = await render(ImageSlider, {
+			...preview_props,
+			buttons: ["fullscreen"]
+		});
+
+		await fireEvent.click(getByLabelText("Fullscreen"));
+		await waitFor(() => {
+			expect(getByLabelText("Exit fullscreen mode")).toBeVisible();
+		});
+
+		await fireEvent.click(getByLabelText("Exit fullscreen mode"));
+		await waitFor(() => {
+			expect(getByLabelText("Fullscreen")).toBeVisible();
+		});
 	});
 
 	test("interactive: true with both images shows Remove Image button", async () => {

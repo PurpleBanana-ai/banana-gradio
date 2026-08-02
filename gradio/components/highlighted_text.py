@@ -77,7 +77,7 @@ class HighlightedText(Component):
             adjacent_separator: Specifies the separator to be used between tokens if combine_adjacent is True.
             show_whitespaces: If False, leading and trailing whitespace of each token will be stripped before display.
             label: the label for this component. Appears above the component and is also used as the header if there are a table of examples for this component. If None and used in a `gr.Interface`, the label will be the name of the parameter this component is assigned to.
-            every: Continously calls `value` to recalculate it if `value` is a function (has no effect otherwise). Can provide a Timer whose tick resets `value`, or a float that provides the regular interval for the reset Timer.
+            every: Continuously calls `value` to recalculate it if `value` is a function (has no effect otherwise). Can provide a Timer whose tick resets `value`, or a float that provides the regular interval for the reset Timer.
             inputs: Components that are used as inputs to calculate `value` if `value` is a function (has no effect otherwise). `value` is recalculated any time the inputs change.
             show_label: if True, will display label.
             container: If True, will place the component in a container - providing some extra padding around the border.
@@ -186,15 +186,17 @@ class HighlightedText(Component):
             output = []
             running_text, running_category = None, None
             for text, category in value:
+                if not text:
+                    # Drop empty tokens so they neither seed a run nor get a
+                    # spurious separator when merged. These are inserted
+                    # between entities when a dict value is converted above,
+                    # but skipping them for list values is also correct.
+                    continue
                 if running_text is None:
                     running_text = text
                     running_category = category
                 elif category == running_category:
                     running_text += self.adjacent_separator + text
-                elif not text:
-                    # Skip fully empty item, these get added in processing
-                    # of dictionaries.
-                    pass
                 else:
                     output.append((running_text, running_category))
                     running_text = text

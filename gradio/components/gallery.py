@@ -107,7 +107,9 @@ class Gallery(Component):
         object_fit: (
             Literal["contain", "cover", "fill", "none", "scale-down"] | None
         ) = None,
-        buttons: list[Literal["share", "download", "fullscreen"] | Button]
+        buttons: list[
+            Literal["share", "download", "download_all", "fullscreen"] | Button
+        ]
         | None = None,
         interactive: bool | None = None,
         type: Literal["numpy", "pil", "filepath"] = "filepath",
@@ -120,7 +122,7 @@ class Gallery(Component):
             format: Format to save images before they are returned to the frontend, such as 'jpeg' or 'png'. This parameter only applies to images that are returned from the prediction function as numpy arrays or PIL Images. The format should be supported by the PIL library.
             file_types: List of file extensions or types of files to be uploaded (e.g. ['image', '.mp4']), when this is used as an input component. "image" allows only image files to be uploaded, "video" allows only video files to be uploaded, ".mp4" allows only mp4 files to be uploaded, etc. If None, any image and video files types are allowed.
             label: the label for this component. Appears above the component and is also used as the header if there are a table of examples for this component. If None and used in a `gr.Interface`, the label will be the name of the parameter this component is assigned to.
-            every: Continously calls `value` to recalculate it if `value` is a function (has no effect otherwise). Can provide a Timer whose tick resets `value`, or a float that provides the regular interval for the reset Timer.
+            every: Continuously calls `value` to recalculate it if `value` is a function (has no effect otherwise). Can provide a Timer whose tick resets `value`, or a float that provides the regular interval for the reset Timer.
             inputs: Components that are used as inputs to calculate `value` if `value` is a function (has no effect otherwise). `value` is recalculated any time the inputs change.
             show_label: if True, will display label.
             container: If True, will place the component in a container - providing some extra padding around the border.
@@ -139,7 +141,7 @@ class Gallery(Component):
             preview: If True, Gallery will start in preview mode, which shows all of the images as thumbnails and allows the user to click on them to view them in full size. Only works if allow_preview is True.
             selected_index: The index of the image that should be initially selected. If None, no image will be selected at start. If provided, will set Gallery to preview mode unless allow_preview is set to False.
             object_fit: CSS object-fit property for the thumbnail images in the gallery. Can be "contain", "cover", "fill", "none", or "scale-down".
-            buttons: A list of buttons to show in the top right corner of the component. Valid options are "share", "download", "fullscreen", or a gr.Button() instance. The "share" button allows the user to share outputs to Hugging Face Spaces Discussions. The "download" button allows the user to download the selected image. The "fullscreen" button allows the user to view the gallery in fullscreen mode. Custom gr.Button() instances will appear in the toolbar with their configured icon and/or label, and clicking them will trigger any .click() events registered on the button. by default, all of the built-in buttons are shown.
+            buttons: A list of buttons to show in the top right corner of the component. Valid options are "share", "download", "download_all", "fullscreen", or a gr.Button() instance. The "share" button allows the user to share outputs to Hugging Face Spaces Discussions. The "download" button allows the user to download the selected image. The "download_all" button allows the user to download all gallery images and videos. The "fullscreen" button allows the user to view the gallery in fullscreen mode. Custom gr.Button() instances will appear in the toolbar with their configured icon and/or label, and clicking them will trigger any .click() events registered on the button. by default, all of the built-in buttons are shown.
             interactive: If True, the gallery will be interactive, allowing the user to upload images. If False, the gallery will be static. Default is True.
             type: The format the image is converted to before being passed into the prediction function. "numpy" converts the image to a numpy array with shape (height, width, 3) and values from 0 to 255, "pil" converts the image to a PIL image object, "filepath" passes a str path to a temporary file containing the image. If the image is SVG, the `type` is ignored and the filepath of the SVG is returned.
             fit_columns: Expand columns to fit the full width when there are fewer images than the columns parameter.
@@ -160,7 +162,7 @@ class Gallery(Component):
         self.type = type
         self.file_types = file_types
         self.buttons = utils.set_default_buttons(
-            buttons, ["share", "download", "fullscreen"]
+            buttons, ["share", "download", "download_all", "fullscreen"]
         )
         self.fit_columns = fit_columns
         self.sources = sources or ["upload"]

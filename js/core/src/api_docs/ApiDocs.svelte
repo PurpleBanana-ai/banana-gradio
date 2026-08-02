@@ -1,5 +1,4 @@
 <script lang="ts">
-	/* eslint-disable */
 	import { onMount, createEventDispatcher } from "svelte";
 	import type { ComponentMeta, Dependency } from "../types";
 	import NoApi from "./NoApi.svelte";
@@ -9,6 +8,7 @@
 	import ApiBanner from "./ApiBanner.svelte";
 	import { BaseButton as Button } from "@gradio/button";
 	import ParametersSnippet from "./ParametersSnippet.svelte";
+	import OAuthTokenSnippet from "./OAuthTokenSnippet.svelte";
 	import InstallSnippet from "./InstallSnippet.svelte";
 	import CodeSnippet from "./CodeSnippet.svelte";
 	import RecordingSnippet from "./RecordingSnippet.svelte";
@@ -147,9 +147,17 @@
 	async function get_summary(): Promise<{
 		functions: any;
 	}> {
-		let response = await fetch(root.replace(/\/$/, "") + "/monitoring/summary");
-		let data = await response.json();
-		return data;
+		try {
+			let response = await fetch(
+				root.replace(/\/$/, "") + "/monitoring/summary"
+			);
+			if (!response.ok) {
+				return { functions: {} };
+			}
+			return await response.json();
+		} catch {
+			return { functions: {} };
+		}
 	}
 
 	get_summary().then((summary) => {
@@ -281,10 +289,12 @@
 		const out: Record<string, Record<string, string>> = {};
 		if (!info?.named_endpoints) return out;
 		for (const dep of dependencies) {
-			const ep = info.named_endpoints["/" + dep.api_name];
+			const api_name = dep.api_name;
+			if (!api_name) continue;
+			const ep = info.named_endpoints["/" + api_name];
 			if (!ep?.code_snippets) continue;
 			const snippets = ep.code_snippets;
-			out[dep.api_name] = {
+			out[api_name] = {
 				python: snippets.python || "",
 				javascript: snippets.javascript || "",
 				bash: snippets.bash || "",
@@ -521,7 +531,7 @@
 							<Button
 								size="sm"
 								variant="secondary"
-								on:click={() =>
+								onclick={() =>
 									dispatch("close", { api_recorder_visible: true })}
 							>
 								<div class="loading-dot"></div>
@@ -579,6 +589,14 @@
 										.code_snippets}
 									{cli_command}
 								/>
+
+								{#if info.named_endpoints["/" + dependency.api_name].oauth_token}
+									<OAuthTokenSnippet
+										oauth_token={info.named_endpoints["/" + dependency.api_name]
+											.oauth_token}
+										{current_language}
+									/>
+								{/if}
 
 								<ParametersSnippet
 									endpoint_returns={info.named_endpoints[

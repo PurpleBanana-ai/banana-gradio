@@ -103,6 +103,12 @@ class TestRoutes:
         with open(file, "rb") as saved_file:
             assert saved_file.read() == b"abcdefghijklmnopqrstuvwxyz"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="On Windows CI python_multipart raises MultipartParseError while "
+        "parsing the oversized header before gradio's own size check returns a "
+        "413, so the response code differs. Passes on Linux/macOS.",
+    )
     def test_header_size_limit(self, test_client):
         with open("test/test_files/alphabet.txt", "rb") as f:
             long_filename = "5" * 9000
@@ -421,6 +427,24 @@ class TestRoutes:
             assert client.get("/ps").is_success
             assert client.get("/py").is_success
 
+    def test_mount_gradio_app_monitoring_summary(self):
+        app = FastAPI()
+        app = gr.mount_gradio_app(
+            app,
+            gr.Interface(lambda s: s, "textbox", "textbox"),
+            path="/default",
+        )
+        app = gr.mount_gradio_app(
+            app,
+            gr.Interface(lambda s: s, "textbox", "textbox"),
+            path="/disabled",
+            enable_monitoring=False,
+        )
+
+        with TestClient(app) as client:
+            assert client.get("/default/monitoring/summary").is_success
+            assert client.get("/disabled/monitoring/summary").status_code == 403
+
     def test_mount_gradio_app_picks_up_root_path_from_asgi_scope(self):
         """Test that media URLs include the proxy prefix when root_path is set
         via the ASGI scope (e.g. uvicorn --root-path), without needing to
@@ -445,6 +469,17 @@ class TestRoutes:
             assert resp.is_success
             assert "/myapp/gradio" in resp.text
 
+    def test_create_app_preserves_app_kwargs_root_path(self):
+        demo = gr.Interface(lambda s: s, "textbox", "textbox")
+        app = routes.App.create_app(demo, app_kwargs={"root_path": "/proxy"})
+
+        assert app.root_path == "/proxy"
+
+        with TestClient(app) as client:
+            resp = client.get("/config")
+            assert resp.is_success
+            assert "/proxy" in resp.json()["root"]
+
     def test_mount_gradio_app_with_app_kwargs(self):
         app = FastAPI()
         demo = gr.Interface(lambda s: f"You said {s}!", "textbox", "textbox").queue()
@@ -452,7 +487,7 @@ class TestRoutes:
             app,
             demo,
             path="/echo",
-            app_kwargs={"docs_url": "/docs-custom"},
+            app_kwargs={"docs_url": "/docs-custom", "root_path": "/proxy"},
         )
         # Use context manager to trigger start up events
         with TestClient(app) as client:
@@ -744,6 +779,36 @@ class TestRoutes:
 
         io.close()
 
+    @pytest.mark.flaky
+    @pytest.mark.parametrize(
+        "url,allowed",
+        [
+            (
+                "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/bread_small.png",
+                True,
+            ),
+            (
+                "https://raw.githubusercontent.com/gradio-app/gradio/main/gradio/media_assets/images/cheetah1.jpg",
+                True,
+            ),
+            ("http://169.254.169.254/latest/meta-data/", False),
+            ("http://127.0.0.1:22/", False),
+            ("http://10.0.0.1/admin", False),
+        ],
+    )
+    def test_file_endpoint_ssrf_protection(self, url, allowed):
+        io = gr.Interface(lambda s: s, gr.Textbox(), gr.Textbox())
+        app = routes.App.create_app(io)
+        client = TestClient(app)
+
+        resp = client.get(f"{API_PREFIX}/file={url}", follow_redirects=False)
+        if allowed:
+            assert resp.status_code == 200
+            assert resp.content
+        else:
+            assert resp.status_code == 403
+            assert "location" not in resp.headers
+
     def test_delete_cache(self, connect, gradio_temp_dir, capsys):
         def check_num_files_exist(blocks: Blocks):
             num_files = 0
@@ -807,6 +872,8 @@ class TestRoutes:
         app, _, _ = demo.launch(prevent_thread_lock=True, enable_monitoring=False)
         client = TestClient(app)
         response = client.get("/monitoring")
+        assert response.status_code == 403
+        response = client.get("/monitoring/summary")
         assert response.status_code == 403
 
 
@@ -910,12 +977,16 @@ class TestAuthenticatedRoutes:
             "/monitoring",
         )
         assert response.status_code == 200
+        response = client.get("/monitoring/summary")
+        assert response.status_code == 200
 
         response = client.get("/logout")
 
         response = client.get(
             "/monitoring",
         )
+        assert response.status_code == 401
+        response = client.get("/monitoring/summary")
         assert response.status_code == 401
 
 
@@ -1732,7 +1803,7 @@ class TestCurlEndpointWithFiles:
         finally:
             demo.close()
 
-    @pytest.mark.seriale
+    @pytest.mark.serial
     def test_text_to_image_exception_reported_in_sse(self):
         def fail_fn(prompt):
             raise RuntimeError("Generation exploded!")
@@ -1826,6 +1897,51 @@ class TestCurlEndpointWithFiles:
             demo.close()
 
 
+class TestCurlEndpointWithOAuthToken:
+    @pytest.mark.serial
+    def test_token_reaches_only_the_endpoint_that_takes_one(self):
+        def report(oauth_token: gr.OAuthToken | None) -> str:
+            return "none" if oauth_token is None else "token:" + oauth_token.token
+
+        with gr.Blocks() as demo:
+            out = gr.Textbox()
+            gr.Button("Report").click(report, None, out, api_name="report")
+            gr.Button("Echo").click(lambda: "echo", None, out, api_name="echo")
+            named = gr.Textbox(value="orig", label="oauth_token")
+            gr.Button("Named").click(
+                lambda oauth_token: "param:" + oauth_token,
+                named,
+                out,
+                api_name="named",
+            )
+
+        demo.launch(prevent_thread_lock=True)
+
+        def call(api_name: str, payload: dict) -> str:
+            post_resp = requests.post(
+                f"{demo.local_api_url}call/v2/{api_name}", json=payload
+            )
+            assert post_resp.status_code == 200, post_resp.text
+            event_id = post_resp.json()["event_id"]
+            sse_resp = requests.get(
+                f"{demo.local_api_url}call/{api_name}/{event_id}", stream=True
+            )
+            output = [line.decode("utf-8") for line in sse_resp.iter_lines() if line]
+            return json.loads(output[-1].removeprefix("data: "))[0]
+
+        try:
+            assert call("report", {"oauth_token": "hf_abc"}) == "token:hf_abc"
+            assert call("report", {}) == "none"
+            # An endpoint that takes no token ignores one rather than erroring.
+            assert call("echo", {"oauth_token": "hf_abc"}) == "echo"
+            # The name is only reserved where the fn takes a token, so an
+            # endpoint with a parameter of that name still receives its value.
+            assert call("named", {"oauth_token": "MINE"}) == "param:MINE"
+            assert call("named", {}) == "param:orig"
+        finally:
+            demo.close()
+
+
 def test_compare_passwords_securely():
     password1 = "password"
     password2 = "pässword"
@@ -1871,6 +1987,37 @@ def test_max_file_size_used_in_upload_route(connect):
     with open("test/test_files/alphabet.txt", "rb") as f:
         r = test_client.post(f"{API_PREFIX}/upload", files={"files": f})
         assert r.status_code == 200
+
+
+def test_max_file_size_used_in_component_server_route(connect):
+    with gr.Blocks() as demo:
+        editor = gr.ImageEditor()
+
+    app, _, _ = demo.launch(prevent_thread_lock=True, max_file_size="1kb")
+    try:
+        test_client = TestClient(app)
+        data = {
+            "session_hash": "123",
+            "component_id": str(editor._id),
+            "fn_name": "accept_blobs",
+            "type": "background",
+            "index": "null",
+            "id": "abc",
+        }
+        r = test_client.post(
+            f"{API_PREFIX}/component_server/",
+            data=data,
+            files={"blob": ("big.bin", b"x" * 2048, "application/octet-stream")},
+        )
+        assert r.status_code == 413
+        r = test_client.post(
+            f"{API_PREFIX}/component_server/",
+            data=data,
+            files={"blob": ("small.bin", b"x" * 8, "application/octet-stream")},
+        )
+        assert r.status_code == 200
+    finally:
+        demo.close()
 
 
 def test_docs_url():
@@ -1970,6 +2117,42 @@ def test_bash_api_multiple_inputs_outputs():
         assert response.status_code == 200
         assert "event: complete\ndata:" in response.text
         assert json.dumps([123, "abc"]) in response.text
+
+
+def test_bash_api_uses_session_hash_for_stateful_calls():
+    def increment(message, button_value, count):
+        count = (count or 0) + 1
+        return f"{message}:{button_value}:{count}", count
+
+    with gr.Blocks() as demo:
+        textbox = gr.Textbox()
+        button = gr.Button("Go")
+        state = gr.State(0)
+        output = gr.Textbox()
+        textbox.submit(
+            increment, [textbox, button, state], [output, state], api_name="predict"
+        )
+
+    app, _, _ = demo.queue().launch(prevent_thread_lock=True, _frontend=False)
+    test_client = TestClient(app)
+
+    try:
+        with test_client:
+            for message, expected in [
+                ("first", "first:None:1"),
+                ("second", "second:None:2"),
+            ]:
+                submit = test_client.post(
+                    f"{API_PREFIX}/call/predict",
+                    json={"data": [message], "session_hash": "stateful-session"},
+                )
+                event_id = submit.json()["event_id"]
+                response = test_client.get(f"{API_PREFIX}/call/predict/{event_id}")
+                assert response.status_code == 200
+                assert "event: complete\ndata:" in response.text
+                assert json.dumps([expected, None]) in response.text
+    finally:
+        demo.close()
 
 
 def test_attacker_cannot_change_root_in_config(
@@ -2087,6 +2270,7 @@ def test_mount_gradio_app_args_match_launch_args():
         "max_threads",
         "i18n",
         "_app",
+        "num_workers",
     }
 
     missing_params = []
@@ -2359,6 +2543,30 @@ class TestOAuthSecurity:
         request = Request(scope)
         response = _redirect_to_target(request)
         assert response.headers["location"] == "/"
+
+    def test_redirect_to_target_blocks_multi_slash_bypass(self):
+        """Regression for GHSA-vwgg-rgg9-xx9q: urlparse keeps 4+ leading
+        slashes in `.path`, so `////evil.com` must not be echoed as the
+        scheme-relative `//evil.com` (which browsers resolve to an external
+        host), bypassing the CVE-2026-28415 fix. Backslashes are treated the
+        same way by browsers and must also be collapsed."""
+        from gradio.oauth import _redirect_to_target
+
+        scope = {"type": "http", "method": "GET", "headers": []}
+
+        # Each hostile target must resolve to a same-origin path: a single
+        # leading slash, never "//host" or "/\host".
+        hostile_to_expected = {
+            b"_target_url=////evil.com/foo": "/evil.com/foo",
+            b"_target_url=//////evil.com/foo": "/evil.com/foo",
+            b"_target_url=/%5Cevil.com": "/evil.com",  # /\evil.com
+        }
+        for query_string, expected in hostile_to_expected.items():
+            scope["query_string"] = query_string
+            location = _redirect_to_target(Request(scope)).headers["location"]
+            assert location == expected
+            assert location.startswith("/")
+            assert not location.startswith(("//", "/\\"))
 
     def test_mocked_oauth_does_not_leak_real_token(self):
         """_get_mocked_oauth_info should return a dummy token, not the real HF token."""

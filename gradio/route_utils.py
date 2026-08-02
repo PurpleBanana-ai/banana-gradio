@@ -4,11 +4,15 @@ import asyncio
 import functools
 import hashlib
 import hmac
+import importlib.resources
 import json
+import mimetypes
 import os
 import pickle
 import re
+import secrets
 import shutil
+import tempfile
 import threading
 import unicodedata
 import uuid
@@ -23,8 +27,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     BinaryIO,
-    NamedTuple,
+    Optional,
     Union,
+    cast,
 )
 from urllib.parse import urlparse
 
@@ -32,8 +37,10 @@ import anyio
 import fastapi
 import gradio_client.utils as client_utils
 import httpx
+import safehttpx
 from gradio_client.documentation import document
 from python_multipart.multipart import MultipartParser, parse_options_header
+from starlette.background import BackgroundTask
 from starlette.datastructures import (
     FormData,
     Headers,
@@ -41,28 +48,42 @@ from starlette.datastructures import (
     State,
     UploadFile,
 )
+from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException, MultipartPart
-from starlette.responses import PlainTextResponse, Response
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import (
+    FileResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from gradio import processing_utils, utils
 from gradio.data_classes import (
     BlocksConfigDict,
+    DeveloperPath,
     MediaStreamChunk,
     PredictBody,
     PredictBodyInternal,
+    UserProvidedPath,
 )
-from gradio.exceptions import Error
+from gradio.exceptions import Error, InvalidPathError
 from gradio.state_holder import SessionState
+from gradio.utils import get_package_version
 
 if TYPE_CHECKING:
     from gradio.blocks import BlockFunction, Blocks, BlocksConfig
     from gradio.helpers import EventData
+    from gradio.oauth import OAuthToken
     from gradio.routes import App
 
 
 config_lock = threading.Lock()
 API_PREFIX = "/gradio_api"
+
+
+mimetypes.init()
 
 
 class Obj:
@@ -347,6 +368,19 @@ def prepare_event_data(
     return event_data
 
 
+def oauth_token_from_body(body: PredictBodyInternal) -> Optional[OAuthToken]:
+    """Wrap a caller-supplied token so it can be injected as a gr.OAuthToken.
+
+    Scope and expiry are empty because the request carries neither.
+    """
+    from gradio.oauth import OAuthToken as _OAuthToken
+
+    token = getattr(body, "oauth_token", None)
+    if not token or not isinstance(token, str):
+        return None
+    return _OAuthToken(token=token, scope="", expires_at=0)
+
+
 async def call_process_api(
     app: App,
     body: PredictBodyInternal,
@@ -383,6 +417,7 @@ async def call_process_api(
                     in_event_listener=True,
                     simple_format=body.simple_format,
                     root_path=root_path,
+                    oauth_token=oauth_token_from_body(body),
                 )
         iterator = output.pop("iterator", None)
         if event_id is not None:
@@ -1094,69 +1129,310 @@ def slugify(value):
     return re.sub(r"[-\s]+", "-", value).strip("-_")
 
 
-class NodeProxyCache:
+# Prefixes that identify "dumb" routes safe to proxy to static workers.
+# These routes serve files, static assets, or handle uploads — no queue/state needed.
+STATIC_ROUTE_PREFIXES = (
+    "/svelte/",
+    "/static/",
+    "/assets/",
+    "/favicon.ico",
+    "/file=",
+    "/file/",
+    "/upload",
+    "/custom_component/",
+)
+
+
+def routes_safe_join(directory: DeveloperPath, path: UserProvidedPath) -> str:
+    """Safely join the user path to the directory while performing some additional http-related checks,
+    e.g. ensuring that the full path exists on the local file system and is not a directory
     """
-    Fan-out streaming cache for NodeJS requests proxying
+    if path == "":
+        raise fastapi.HTTPException(400)
+    if starts_with_protocol(path):
+        raise fastapi.HTTPException(403)
+    try:
+        fullpath = Path(utils.safe_join(directory, path))
+    except InvalidPathError as e:
+        raise fastapi.HTTPException(403) from e
+    if fullpath.is_dir():
+        raise fastapi.HTTPException(403)
+    if not fullpath.exists():
+        raise fastapi.HTTPException(404)
+    return str(fullpath)
+
+
+STATIC_TEMPLATE_LIB = cast(
+    DeveloperPath,
+    importlib.resources.files("gradio").joinpath("templates").as_posix(),  # type: ignore
+)
+STATIC_PATH_LIB = cast(
+    DeveloperPath,
+    importlib.resources.files("gradio")
+    .joinpath("templates/frontend/static")
+    .as_posix(),  # type: ignore
+)
+BUILD_PATH_LIB = cast(
+    DeveloperPath,
+    importlib.resources.files("gradio")
+    .joinpath("templates/frontend/assets")
+    .as_posix(),  # type: ignore
+)
+VERSION = get_package_version()
+XSS_SAFE_MIMETYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/ogg",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "text/plain",
+    "application/json",
+}
+
+DEFAULT_TEMP_DIR = os.environ.get("GRADIO_TEMP_DIR") or str(
+    Path(tempfile.gettempdir()) / "gradio"
+)
+
+
+def file_response(developer_path: DeveloperPath, user_path: UserProvidedPath):
+    return FileResponse(routes_safe_join(developer_path, user_path))
+
+
+def favicon(favicon_path: str | Path | None = None):
+    if favicon_path is None:
+        return file_response(STATIC_PATH_LIB, UserProvidedPath("img/logo.svg"))
+    else:
+        return FileResponse(favicon_path)
+
+
+_FILE_STREAM_MAX_REDIRECTS = 20
+_FILE_STREAM_PASSTHROUGH_HEADERS = (
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "last-modified",
+    "etag",
+)
+
+
+async def secure_url_stream_response(url: str, request: StarletteRequest):
     """
+    SSRF-safe way to serve an http(s) URL from the `/gradio_api/file=<url>`
+    endpoint. Instead of redirecting the caller to `url` (an open redirect, and
+    a client-side SSRF vector because `gradio_client` follows redirects), the
+    server fetches `url` itself through `safehttpx` — which resolves the host,
+    confirms it maps to a public IP, and pins that IP for the connection so a DNS
+    rebind cannot swap in an internal address — and streams the bytes back,
+    re-validating every redirect hop. Hosts that are unresolvable or resolve to a
+    private / loopback / link-local / reserved address are rejected. See #13593.
+    """
+    forward_headers = {}
+    range_header = request.headers.get("Range")
+    if range_header:
+        forward_headers["Range"] = range_header
 
-    class CacheEntry(NamedTuple):
-        head: bytearray
-        subs: list[asyncio.Queue[bytes | None]]
-        resp: asyncio.Future[httpx.Response | None]
-
-    class ProxyReq(NamedTuple):
-        method: str
-        url: str
-        headers: dict[str, str]
-
-    def __init__(self, client: httpx.AsyncClient):
-        self.client = client
-        self.cache: dict[str, NodeProxyCache.CacheEntry | None] = {}
-
-    async def get(self, req: ProxyReq):
-        key = f"{req.method} {req.url}"
-        key += "::".join(map(":".join, req.headers.items()))
-        res: asyncio.Queue[bytes | None] = asyncio.Queue()
-        if (entry := self.cache.get(key, None)) is None:
-            loop = asyncio.get_running_loop()
-            entry = NodeProxyCache.CacheEntry(bytearray(), [], loop.create_future())
-            asyncio.create_task(self.fetch(key, entry, req))
-            self.cache[key] = entry
-        entry.subs.append(res)
-        head = bytes(entry.head)
-        if (resp := await entry.resp) is None:
-            raise Error("Error while proxying request to Node server")
-        return resp.status_code, resp.headers, NodeProxyCache.iter_body(head, res)
-
-    async def fetch(self, key: str, entry: CacheEntry, req: ProxyReq):
+    current_url = url
+    redirects = 0
+    while True:
         try:
-            response = await self.client.send(
-                self.client.build_request(
-                    method=req.method,
-                    url=httpx.URL(req.url),
-                    headers=req.headers,
-                ),
-                stream=True,
+            parsed = httpx.URL(current_url)
+        except Exception as e:
+            raise HTTPException(403, f"File not allowed: {url}.") from e
+        if parsed.scheme not in ("http", "https") or not parsed.host:
+            raise HTTPException(403, f"File not allowed: {url}.")
+        try:
+            verified_ip = await safehttpx.async_validate_url(parsed.host)
+        except Exception as e:
+            raise HTTPException(403, f"File not allowed: {url}.") from e
+
+        transport = safehttpx.AsyncSecureTransport(verified_ip)
+        client = httpx.AsyncClient(
+            transport=transport, timeout=httpx.Timeout(None, connect=10.0)
+        )
+        try:
+            req = client.build_request(
+                request.method, current_url, headers=forward_headers
             )
-        except Exception:
-            entry.resp.set_result(None)
-            del self.cache[key]
-            raise
-        entry.resp.set_result(response)
-        try:
-            async for bytes_chunk in response.aiter_raw():
-                entry.head.extend(bytes_chunk)
-                for sub in entry.subs:
-                    sub.put_nowait(bytes_chunk)
-        finally:
-            for sub in entry.subs:
-                sub.put_nowait(None)
-            del self.cache[key]
-            await response.aclose()
+            upstream = await client.send(req, stream=True)
+        except Exception as e:
+            await client.aclose()
+            raise HTTPException(502, f"Could not fetch file: {url}.") from e
 
-    @staticmethod
-    async def iter_body(head: bytes, queue: asyncio.Queue[bytes | None]):
-        if len(head) > 0:
-            yield head
-        while (chunk := await queue.get()) is not None:
-            yield chunk
+        if upstream.has_redirect_location:
+            location = upstream.headers.get("location", "")
+            await upstream.aclose()
+            await client.aclose()
+            redirects += 1
+            if redirects > _FILE_STREAM_MAX_REDIRECTS or not location:
+                raise HTTPException(502, f"Could not fetch file: {url}.")
+            current_url = str(httpx.URL(current_url).join(location))
+            continue
+
+        upstream_mime = upstream.headers.get("content-type", "").split(";")[0].strip()
+        guessed_mime, _ = mimetypes.guess_type(current_url)
+        if upstream_mime in XSS_SAFE_MIMETYPES or guessed_mime in XSS_SAFE_MIMETYPES:
+            content_type = upstream_mime or guessed_mime or "application/octet-stream"
+            content_disposition = "inline"
+        else:
+            content_type = "application/octet-stream"
+            content_disposition = "attachment"
+
+        response_headers = {
+            "Content-Type": content_type,
+            "Content-Disposition": content_disposition,
+            "X-Content-Type-Options": "nosniff",
+        }
+        for header in _FILE_STREAM_PASSTHROUGH_HEADERS:
+            if header in upstream.headers:
+                response_headers[header] = upstream.headers[header]
+
+        async def _close(upstream=upstream, client=client) -> None:
+            await upstream.aclose()
+            await client.aclose()
+
+        return StreamingResponse(
+            upstream.aiter_raw(),
+            status_code=upstream.status_code,
+            headers=response_headers,
+            background=BackgroundTask(_close),
+        )
+
+
+def file_fetch(
+    path_or_url,
+    request,
+    blocks_or_config,
+    upload_dir,
+):
+    # NOTE: http(s) URLs are intentionally NOT handled here. Previously this
+    # returned a 302 redirect to the URL, which was an open redirect and — since
+    # `gradio_client` follows redirects — a client-side SSRF vector (#13593).
+    # They are now served by `secure_url_stream_response()` from the async route,
+    # which fetches through `safehttpx` (public-IP validated, IP-pinned) and
+    # streams the bytes back. Any http(s) URL reaching this sync path falls
+    # through to the `starts_with_protocol` guard below and is rejected.
+    if starts_with_protocol(path_or_url):
+        raise HTTPException(403, f"File not allowed: {path_or_url}.")
+
+    abs_path = utils.abspath(path_or_url)
+    try:
+        if abs_path.is_dir() or not abs_path.exists():
+            raise HTTPException(403, f"File not allowed: {path_or_url}.")
+    except Exception as e:
+        raise HTTPException(403, f"File not allowed: {path_or_url}.") from e
+
+    from gradio.data_classes import _StaticFiles
+
+    allowed, reason = utils.is_allowed_file(
+        abs_path,
+        blocked_paths=blocks_or_config.blocked_paths,
+        allowed_paths=blocks_or_config.allowed_paths + _StaticFiles.all_paths,
+        created_paths=[upload_dir, str(utils.get_cache_folder())],
+    )
+    if not allowed:
+        raise HTTPException(403, f"File not allowed: {path_or_url}.")
+
+    mime_type, _ = mimetypes.guess_type(abs_path)
+    if mime_type in XSS_SAFE_MIMETYPES or reason == "allowed":
+        media_type = mime_type or "application/octet-stream"
+        content_disposition_type = "inline"
+    else:
+        media_type = "application/octet-stream"
+        content_disposition_type = "attachment"
+
+    range_val = request.headers.get("Range", "").strip()
+    if range_val.startswith("bytes=") and "-" in range_val:
+        range_val = range_val[6:]
+        start, end = range_val.split("-")
+        if start.isnumeric() and end.isnumeric():
+            from gradio import ranged_response  # type: ignore
+
+            start = int(start)
+            end = int(end)
+            headers = dict(request.headers)
+            headers["Content-Disposition"] = content_disposition_type
+            headers["Content-Type"] = media_type
+            return ranged_response.RangedFileResponse(
+                abs_path,
+                ranged_response.OpenRange(start, end),
+                headers,
+                stat_result=os.stat(abs_path),
+            )
+
+    return FileResponse(
+        abs_path,
+        headers={"Accept-Ranges": "bytes"},
+        content_disposition_type=content_disposition_type,
+        media_type=media_type,
+        filename=abs_path.name,
+    )
+
+
+async def upload_fn(
+    request: StarletteRequest,
+    upload_dir,
+    max_file_size,
+    upload_id,
+    force_move: bool = True,
+    upload_progress: FileUploadProgress | None = None,
+):
+    content_type_header = request.headers.get("Content-Type")
+    content_type: bytes
+    content_type, _ = parse_options_header(content_type_header or "")
+    if content_type != b"multipart/form-data":
+        raise HTTPException(status_code=400, detail="Invalid content type.")
+
+    if upload_id and upload_progress:
+        upload_progress.track(upload_id)
+
+    multipart_parser = GradioMultiPartParser(
+        request.headers,
+        request.stream(),
+        max_files=1000,
+        max_fields=1000,
+        max_file_size=max_file_size,
+        upload_id=upload_id,
+        upload_progress=upload_progress,
+    )
+    form = await multipart_parser.parse()
+
+    output_files = []
+    files_to_copy = []
+    locations = []
+    for temp_file in form.getlist("files"):
+        if not isinstance(temp_file, GradioUploadFile):
+            raise TypeError("File is not an instance of GradioUploadFile")
+        if temp_file.filename:
+            file_name = Path(temp_file.filename).name
+            name = client_utils.strip_invalid_filename_characters(file_name)
+        else:
+            name = f"tmp{secrets.token_hex(5)}"
+        directory = Path(upload_dir) / temp_file.sha.hexdigest()
+        directory.mkdir(exist_ok=True, parents=True)
+        try:
+            dest = utils.safe_join(
+                DeveloperPath(str(directory)), UserProvidedPath(name)
+            )
+        except InvalidPathError as err:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid file name: {name}"
+            ) from err
+        temp_file.file.close()
+        try:
+            os.rename(temp_file.file.name, dest)
+        except OSError:
+            if force_move:
+                import shutil
+
+                shutil.move(temp_file.file.name, dest)
+            else:
+                files_to_copy.append(temp_file.file.name)
+                locations.append(dest)
+        output_files.append(dest)
+
+    return output_files, files_to_copy, locations

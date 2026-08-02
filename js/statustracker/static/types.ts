@@ -10,6 +10,10 @@ export interface ILoadingStatus {
 	scroll_to_output?: boolean;
 	show_progress?: "full" | "minimal" | "hidden";
 	time_limit?: number | null | undefined;
+	/** performance.now() when this run first entered pending; survives soft reload. */
+	time_start?: number | null;
+	/** Total ETA (elapsed + remaining) at last server eta update; survives soft reload. */
+	eta_total?: number | null;
 	progress?: {
 		progress: number | null;
 		index: number | null;
@@ -18,13 +22,15 @@ export interface ILoadingStatus {
 		desc: string | null;
 	}[];
 	validation_error?: string | null;
-	type: "input" | "output";
+	type: "input" | "output" | "skip";
 	stream_state: "open" | "closed" | "waiting" | null;
 	used_cache?: "full" | "partial" | null;
 	cache_duration?: number | null;
 	avg_time?: number | null;
 	cache_event_id?: number | null;
 }
+
+export type LoadingStatusCollection = Record<number, ILoadingStatus>;
 
 export interface LoadingStatusArgs {
 	fn_index: ILoadingStatus["fn_index"];
@@ -36,7 +42,7 @@ export interface LoadingStatusArgs {
 	message?: ILoadingStatus["message"];
 	progress_data?: ILoadingStatus["progress"];
 	time_limit?: ILoadingStatus["time_limit"];
-	type?: "input" | "output";
+	type?: "input" | "output" | "skip";
 	stream_state: "open" | "closed" | "waiting" | null;
 	validation_error?: string;
 	show_validation_error?: boolean;

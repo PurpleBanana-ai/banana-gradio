@@ -5,8 +5,10 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import warnings
+from collections import deque
 from concurrent.futures import TimeoutError
 from contextlib import closing
 from http.client import HTTPConnection
@@ -29,13 +31,20 @@ def start_node_server(
     server_name: str | None = None,
     server_port: int | None = None,
     node_path: str | None = None,
+    python_port: int | None = None,
+    python_host: str | None = None,
+    static_worker_ports: list[int] | None = None,
+    debug: bool = False,
 ) -> tuple[str | None, subprocess.Popen[bytes] | None, int | None]:
-    """Launches a local server running the provided Interface
+    """Launches the Node SSR server as a front proxy.
+
     Parameters:
         server_name: to make app accessible on local network, set this to "0.0.0.0". Can be set by environment variable GRADIO_SERVER_NAME.
         server_port: will start gradio app on this port (if available). Can be set by environment variable GRADIO_SERVER_PORT.
         node_path: the path to the node executable. Can be set by environment variable GRADIO_NODE_PATH.
-        ssr_mode: If False, will not start the node server and will serve the SPA from the Python server
+        python_port: the port of the main Python (FastAPI) server that Node will proxy to.
+        python_host: the host of the main Python server (default 127.0.0.1).
+        static_worker_ports: ports of static file worker processes for round-robin proxying.
 
     Returns:
         server_name: the name of the server (default is "localhost")
@@ -56,13 +65,17 @@ def start_node_server(
     server_ports = (
         [server_port]
         if server_port is not None
-        else range(INITIAL_PORT_VALUE + 1, INITIAL_PORT_VALUE + 1 + TRY_NUM_PORTS)
+        else range(INITIAL_PORT_VALUE, INITIAL_PORT_VALUE + TRY_NUM_PORTS)
     )
 
     node_process, node_port = start_node_process(
         node_path=node_path or os.getenv("GRADIO_NODE_PATH"),
         server_name=host,
         server_ports=server_ports,
+        python_port=python_port,
+        python_host=python_host or "127.0.0.1",
+        static_worker_ports=static_worker_ports or [],
+        debug=debug,
     )
 
     return server_name, node_process, node_port
@@ -76,6 +89,10 @@ def start_node_process(
     node_path: str | None,
     server_name: str,
     server_ports: list[int] | range,
+    python_port: int | None = None,
+    python_host: str = "127.0.0.1",
+    static_worker_ports: list[int] | None = None,
+    debug: bool = False,
 ) -> tuple[subprocess.Popen[bytes] | None, int | None]:
     if GRADIO_LOCAL_DEV_MODE:
         return None, 9876
@@ -83,6 +100,10 @@ def start_node_process(
         return None, None
 
     node_process = None
+    # Node's own output is hidden unless debug=True, which means a server that starts
+    # but fails to render leaves no trace. Keep the last of it so a failed startup can
+    # say what actually went wrong instead of guessing at the Node version.
+    node_errors: str = ""
 
     for port in server_ports:
         try:
@@ -97,26 +118,59 @@ def start_node_process(
             s.close()
 
             # Set environment variables for the Node server
-            env = os.environ
+            env = os.environ.copy()
             env["PORT"] = str(port)
             env["HOST"] = server_name
             if GRADIO_LOCAL_DEV_MODE:
                 env["GRADIO_LOCAL_DEV_MODE"] = "1"
 
+            # Proxy configuration: tell Node where Python and workers are
+            if python_port is not None:
+                env["GRADIO_PYTHON_PORT"] = str(python_port)
+                env["GRADIO_PYTHON_HOST"] = python_host
+            if static_worker_ports:
+                env["GRADIO_STATIC_WORKER_PORTS"] = ",".join(
+                    str(p) for p in static_worker_ports
+                )
+            else:
+                env.pop("GRADIO_STATIC_WORKER_PORTS", None)
+
             register_file = str(
                 Path(__file__).parent.joinpath("templates", "register.mjs")
             )
 
+            # Node --import needs a file:// URL on Windows; Path.as_uri()
+            # produces a valid URL (file:///C:/...) unlike "file://" + path.
             if sys.platform == "win32":
-                register_file = "file://" + register_file
+                register_file = Path(register_file).as_uri()
 
             node_process = subprocess.Popen(
                 [node_path, "--import", register_file, SSR_APP_PATH],
-                stdout=subprocess.DEVNULL,
                 env=env,
+                stdout=None if debug else subprocess.DEVNULL,
+                stderr=None if debug else subprocess.PIPE,
             )
 
-            is_working = verify_server_startup(server_name, port, timeout=5)
+            # The pipe has to be drained for the lifetime of the process or Node
+            # blocks once the buffer fills, so a thread keeps reading it and holds
+            # on to only the most recent lines.
+            recent_errors: deque[str] = deque(maxlen=50)
+            stderr_thread = None
+            if node_process.stderr is not None:
+                stderr_thread = threading.Thread(
+                    target=drain_stderr,
+                    args=(node_process.stderr, recent_errors),
+                    daemon=True,
+                )
+                stderr_thread.start()
+
+            # Node starts only after the Python backend is already
+            # listening (Blocks.launch defers the front-proxy start), so we
+            # can verify that Node actually renders a page rather than merely
+            # opening its TCP port. Polling HEAD / until it succeeds means the
+            # SSR runtime is warm before we return — otherwise the user-facing
+            # port is reachable while the first requests 502 as SSR initialises.
+            is_working = verify_server_startup(server_name, port, timeout=30)
             if is_working:
                 signal.signal(
                     signal.SIGTERM, lambda _, __: handle_sigterm(node_process)
@@ -129,6 +183,11 @@ def start_node_process(
                 # If verification failed, terminate the process and try the next port
                 node_process.terminate()
                 node_process.wait(timeout=2)
+                # Let the reader finish the lines already in the pipe before we
+                # look at them, otherwise the diagnosis can race the output.
+                if stderr_thread is not None:
+                    stderr_thread.join(timeout=2)
+                node_errors = "".join(recent_errors).strip() or node_errors
                 node_process = None
 
         except OSError:
@@ -146,14 +205,35 @@ def start_node_process(
     print(
         f"Cannot start Node server on any port in the range {server_ports[0]}-{server_ports[-1]}."
     )
-    print(
-        "Please install Node 20 or higher and set the environment variable GRADIO_NODE_PATH to the path of your Node executable."
-    )
+    if node_errors:
+        # Node ran and told us why it couldn't serve requests, so pass that along
+        # rather than pointing at the Node installation, which is evidently fine.
+        # The same failure usually repeats once per probe, so one tail is enough.
+        print("The Node server reported:")
+        print("\n".join(node_errors.splitlines()[-20:]))
+    else:
+        print(
+            "Please install Node 20 or higher and set the environment variable GRADIO_NODE_PATH to the path of your Node executable."
+        )
     print(
         "You can explicitly specify a port by setting the environment variable GRADIO_NODE_PORT."
     )
 
     return None, None
+
+
+def drain_stderr(stream, buffer: deque[str]) -> None:
+    """Reads the Node server's stderr, keeping only the most recent lines."""
+    try:
+        for line in iter(stream.readline, b""):
+            buffer.append(line.decode("utf-8", errors="replace"))
+    except Exception:
+        pass
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 def attempt_connection(host: str, port: int) -> bool:
@@ -168,13 +248,9 @@ def attempt_connection(host: str, port: int) -> bool:
 
 
 def verify_server_startup(host: str, port: int, timeout: float = 15.0) -> bool:
-    """Verifies if a server is up and running by making an HTTP request.
-
-    A simple TCP connection check is not sufficient because the Node SSR server
-    may accept connections before it is ready to handle HTTP requests. This
-    would cause Gradio's own url_ok health check (which does HEAD /) to fail
-    intermittently.
-    """
+    """Polls ``HEAD /`` until the server returns a non-5xx status (or the
+    timeout elapses), confirming it can actually serve requests rather than
+    just that its TCP port is open."""
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:

@@ -206,7 +206,17 @@
 		globalFilterFn: "includesString",
 		enableSorting: true,
 		enableMultiSort: true,
-		maxMultiSortColCount: 3
+		maxMultiSortColCount: 3,
+		// This table has no pagination or row-expansion UI, so TanStack's
+		// automatic page-index/expanded resets are pure churn: when `data`
+		// changes, the row-model memos' onChange fires `_autoResetPageIndex`,
+		// which calls setState({ pagination }) -> our onStateChange bumps
+		// `version` -> the `rows`/`header_groups` $derived re-run -> the row
+		// model recomputes -> onChange fires again, an infinite microtask loop
+		// that freezes the page (see issue #13198). Disabling these resets
+		// removes the only internal setState that occurs during render.
+		autoResetPageIndex: false,
+		autoResetExpanded: false
 	});
 
 	let rows = $derived(table.getRowModel().rows);
@@ -850,9 +860,8 @@
 		return () => document.removeEventListener("click", handle_click_outside);
 	});
 
-	function measure_row(node: HTMLElement) {
+	function measure_row(node: HTMLElement, _row?: unknown) {
 		tick().then(() => {
-			console.log("measuring");
 			virtualizer.instance.measureElement(node as any);
 		});
 

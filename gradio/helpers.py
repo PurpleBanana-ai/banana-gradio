@@ -11,7 +11,7 @@ import inspect
 import os
 import shutil
 import warnings
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -915,12 +915,33 @@ def create_tracker(fn, track_tqdm):
     )
 
 
+def _session_from_request(request: Any) -> MutableMapping[str, Any]:
+    """Return the request's session, or an empty mapping if there is no session
+    to read (the normal case for apps without OAuth / SessionMiddleware).
+
+    For a real Starlette/fastapi request the session lives in `scope["session"]`;
+    touching `.session` directly would raise Starlette's "SessionMiddleware must
+    be installed" assertion when it's absent, so we gate on `scope` membership
+    instead. A `gr.Request` exposes the fastapi request as `.request`; objects
+    without a Starlette `scope` (a queued `gr.Request` rebuilt from kwargs) may
+    still carry a plain `.session`.
+    """
+    if request is None:
+        return {}
+    underlying = getattr(request, "request", None) or request
+    scope = getattr(underlying, "scope", None)
+    if isinstance(scope, dict):
+        return scope.get("session", {})
+    return getattr(underlying, "session", None) or {}
+
+
 def special_args(
     fn: Callable,
     inputs: list[Any] | None = None,
     request: routes.Request | None = None,
     event_data: EventData | None = None,
     component_props: dict[int, dict[str, Any]] | None = None,
+    token: oauth.OAuthToken | None = None,
 ) -> tuple[list, int | None, int | None, list[int]]:
     """
     Checks if function has special arguments Request or EventData (via annotation) or Progress (via default value).
@@ -932,6 +953,9 @@ def special_args(
         request: request to load into inputs.
         event_data: event-related data to load into inputs.
         component_props: dictionary mapping input indices to their full component props.
+        token: an OAuthToken to inject into OAuthToken-annotated params when one cannot
+            be derived from the request session (e.g. server-side workflow calls that
+            resolve the token outside of a browser session).
     Returns:
         updated inputs, progress index, event data index, list of input indices that need component props.
     """
@@ -969,34 +993,20 @@ def special_args(
             oauth.OAuthToken,
         ):
             if inputs is not None:
-                # Retrieve session from gr.Request, if it exists (i.e. if user is logged in)
-                try:
-                    session = (
-                        # request.session (if fastapi.Request obj i.e. direct call)
-                        getattr(request, "session", {})
-                        or
-                        # or request.request.session (if gr.Request obj i.e. websocket call)
-                        getattr(getattr(request, "request", None), "session", {})
-                    )
-                except AssertionError as e:
-                    if (
-                        "SessionMiddleware must be installed to access request.session"
-                        in str(e)
-                    ):
-                        warnings.warn(
-                            "Empty session being created. Install gradio[oauth] and add a gr.LoginButton to your app to enable OAuth login.",
-                            UserWarning,
-                        )
-                        session = {}
-                    else:
-                        raise e
+                # Read the session if a SessionMiddleware is installed (i.e. the
+                # user may be logged in); otherwise treat as logged out. Required
+                # OAuth params still raise an explicit error below.
+                session = _session_from_request(request)
+
+                # Expiry means "treat as logged out" here; the session entry
+                # itself is only removed on the next LoginButton page-load check,
+                # which operates on the raw session.
+                oauth_info = oauth._get_valid_oauth_info_from_session(session)
 
                 # Inject user profile
                 if type_hint in (Optional[oauth.OAuthProfile], oauth.OAuthProfile):
                     oauth_profile = (
-                        session["oauth_info"]["userinfo"]
-                        if "oauth_info" in session
-                        else None
+                        oauth_info["userinfo"] if oauth_info is not None else None
                     )
                     if oauth_profile is not None:
                         oauth_profile = oauth.OAuthProfile(oauth_profile)
@@ -1008,7 +1018,6 @@ def special_args(
 
                 # Inject user token
                 elif type_hint in (Optional[oauth.OAuthToken], oauth.OAuthToken):
-                    oauth_info = session.get("oauth_info")
                     oauth_token = (
                         oauth.OAuthToken(
                             token=oauth_info["access_token"],
@@ -1018,6 +1027,10 @@ def special_args(
                         if oauth_info is not None
                         else None
                     )
+                    # Fall back to a directly-supplied token when the session does
+                    # not yield one (e.g. server-side workflow calls).
+                    if oauth_token is None and token is not None:
+                        oauth_token = token
                     if oauth_token is None and type_hint == oauth.OAuthToken:
                         raise Error(
                             "This action requires a logged in user. Please sign in and retry."

@@ -185,6 +185,11 @@
 			if (parsed_head_html) {
 				for (let head_element of parsed_head_html) {
 					let newElement = document.createElement(head_element.tagName);
+					if (newElement.tagName === "SCRIPT") {
+						// Created scripts default to force-async; restore document order
+						// (an explicit `async` attribute is re-applied just below).
+						(newElement as HTMLScriptElement).async = false;
+					}
 					Array.from(head_element.attributes).forEach((attr) => {
 						newElement.setAttribute(attr.name, attr.value);
 					});
@@ -262,6 +267,9 @@
 	}
 
 	onMount(async () => {
+		window.addEventListener("beforeunload", () => {
+			app?.close();
+		});
 		//@ts-ignore
 		config = data.config;
 		window.gradio_config = data.config;
@@ -325,20 +333,23 @@
 					}
 				});
 				stream.addEventListener("reload", async (event) => {
-					app.close();
-					app = await Client.connect(data.api_url, {
-						status_callback: handle_status,
-						with_null_state: true,
-						events: ["data", "log", "status", "render"],
-						session_hash: app.session_hash
-					});
-
-					if (!app.config) {
-						throw new Error("Could not resolve app config");
+					try {
+						// Soft-reload: refresh config in place so in-flight SSE
+						// streams (and generators) keep working across the reload.
+						config = await app.refresh();
+						reload_count += 1;
+						window.__gradio_space__ = config.space_id;
+					} catch (error) {
+						new_message_fn(
+							"Error",
+							"Error reloading app",
+							-1,
+							"error",
+							10,
+							true
+						);
+						console.error("Error reloading app:", error);
 					}
-					reload_count += 1;
-					config = app.config;
-					window.__gradio_space__ = config.space_id;
 				});
 			}, 200);
 		}
@@ -378,9 +389,11 @@
 	let root = $derived.by(() => {
 		if (!browser) return config.root;
 		const current_url = new URL(window.location.toString());
-		const root_url = new URL(config.root);
+		const root_url = new URL(config.root, current_url);
 
-		return new URL(root_url.pathname, current_url).toString();
+		return new URL(root_url.pathname, current_url)
+			.toString()
+			.replace(/\/$/, "");
 	});
 	run(() => {
 		if (config?.app_id) {

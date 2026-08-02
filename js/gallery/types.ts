@@ -1,5 +1,5 @@
-import type { FileData, SelectData } from "@gradio/client";
-import type { CustomButton } from "@gradio/utils";
+import type { FileData } from "@gradio/client";
+import type { CustomButton, SelectData } from "@gradio/utils";
 
 export interface GalleryImage {
 	image: FileData;
@@ -23,7 +23,13 @@ export interface GalleryProps {
 	allow_preview: boolean;
 	selected_index: number | null;
 	object_fit: "contain" | "cover" | "fill" | "none" | "scale-down";
-	buttons: (string | CustomButton)[];
+	buttons: (
+		| "share"
+		| "download"
+		| "download_all"
+		| "fullscreen"
+		| CustomButton
+	)[];
 	type: "numpy" | "pil" | "filepath";
 	fit_columns: boolean;
 	sources: ("upload" | "webcam-video" | "webcam" | "clipboard")[];
@@ -36,6 +42,7 @@ export interface GalleryEvents {
 	delete: { file: FileData; index: number };
 	preview_open: never;
 	preview_close: never;
+	clear: never;
 	clear_status: any;
 	share: any;
 	error: any;

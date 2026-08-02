@@ -1,5 +1,23 @@
 # @gradio/group
 
+## 0.3.8
+
+### Dependency updates
+
+- @gradio/utils@0.14.0
+
+## 0.3.7
+
+### Dependency updates
+
+- @gradio/utils@0.13.0
+
+## 0.3.6
+
+### Fixes
+
+- [#13523](https://github.com/gradio-app/gradio/pull/13523) [`1b611f8`](https://github.com/gradio-app/gradio/commit/1b611f89fb85016a7879020098bd0faedf80ae5e) - Fixes grouped accordion borders and empty plot legends.  Thanks @dawoodkhan82!
+
 ## 0.3.5
 
 ### Features

@@ -30,7 +30,7 @@
 	}
 
 	const props = $props();
-	const gradio = new GalleryGradio<GalleryEvents, GalleryProps>(props, {
+	const gradio = new GalleryGradio(props, {
 		selected_index: null,
 		file_types: ["image", "video"]
 	});
@@ -192,7 +192,7 @@
 					gradio.dispatch("upload", gradio.props.value);
 					gradio.dispatch("change", gradio.props.value);
 				}}
-				onerror={({ detail }) => {
+				onerror={(detail) => {
 					gradio.shared.loading_status = gradio.shared.loading_status || {};
 					gradio.shared.loading_status.status = "error";
 					gradio.dispatch("error", detail);
@@ -205,9 +205,10 @@
 			<Webcam
 				root={gradio.shared.root}
 				value={null}
-				on:capture={async (e) => {
+				oncapture={async (detail) => {
+					if (!(detail instanceof Blob)) return;
 					const f = await handle_save(
-						e.detail,
+						detail,
 						(f) => gradio.shared.client.upload(f, gradio.shared.root),
 						"webcam_upload"
 					);
@@ -216,9 +217,6 @@
 					active_source = null;
 					gradio.dispatch("change", gradio.props.value);
 				}}
-				on:error
-				on:drag
-				on:close_stream
 				mirror_webcam={true}
 				streaming={false}
 				mode="image"
@@ -230,17 +228,15 @@
 			<Webcam
 				root={gradio.shared.root}
 				value={null}
-				on:capture={async (e) => {
-					const f = { ...e.detail };
+				oncapture={async (detail) => {
+					if (!detail) return;
+					const f = { ...(detail as FileData) };
 					f.mime_type = "video/webm";
 					const processed_files = await process_upload_files([f]);
 					gradio.props.value?.push(...processed_files);
 					active_source = null;
 					gradio.dispatch("change", gradio.props.value);
 				}}
-				on:error
-				on:drag
-				on:close_stream
 				mirror_webcam={true}
 				streaming={false}
 				mode="video"
@@ -254,7 +250,7 @@
 				{sources}
 				bind:active_source
 				handle_clear={() => gradio.dispatch("clear")}
-				handle_select={handle_select_source}
+				handle_select={(source) => handle_select_source(source as any)}
 			/>
 		{/if}
 	{:else}
@@ -282,7 +278,7 @@
 				gradio.dispatch("change", gradio.props.value);
 			}}
 			{sources}
-			{onsource_change}
+			onsource_change={(source) => onsource_change(source as any)}
 			label={gradio.shared.label}
 			show_label={gradio.shared.show_label}
 			columns={gradio.props.columns}
@@ -299,6 +295,9 @@
 			)}
 			show_download_button={gradio.props.buttons.some(
 				(btn) => typeof btn === "string" && btn === "download"
+			)}
+			show_download_all_button={gradio.props.buttons.some(
+				(btn) => typeof btn === "string" && btn === "download_all"
 			)}
 			fit_columns={gradio.props.fit_columns}
 			i18n={gradio.i18n}

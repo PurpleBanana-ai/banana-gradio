@@ -11,7 +11,7 @@
 		"lint": "ESLINT_USE_FLAT_CONFIG=true eslint -c .config/eslint.config.js js client/js",
 		"ts:check": "svelte-check --tsconfig tsconfig.json --threshold error",
 		"test": "pnpm --filter @gradio/client build && vitest dev --config .config/vitest.config.ts",
-		"test:run": "pnpm --filter @gradio/client build && vitest run --config .config/vitest.config.ts",
+		"test:run": "pnpm --filter @gradio/client build && vitest run --config .config/vitest.config.ts && node --test js/app/proxy_routes.test.js",
 		"test:client": "pnpm --filter=@gradio/client test",
 		"test:browser": "pnpm --filter @self/spa test:browser",
 		"test:browser:reload": "CUSTOM_TEST=1 pnpm --filter @self/spa test:browser:reload",
@@ -21,8 +21,7 @@
 		"storybook": "storybook dev -p 6006",
 		"build-storybook": "storybook build",
 		"ci:version": "changeset version && pnpm i --lockfile-only && node ./.changeset/fix_changelogs.cjs",
-		"ci:publish": "pnpm changeset tag && git push origin --tags && pnpm publish --no-git-checks --access public -r --filter=@gradio/*",
-		"test:ct": "playwright test -c ./.config/playwright-ct.config.ts",
+		"ci:publish": "pnpm changeset tag && TAG=gradio_client@$(node -p \"require('./client/python/gradio_client/package.json').version\") && (git rev-parse --verify --quiet \"refs/tags/$TAG\" >/dev/null || git tag -a \"$TAG\" -m \"$TAG\") && git push origin --tags && pnpm publish --no-git-checks --access public -r --filter=@gradio/*",
 		"website": "pnpm --filter @gradio/website build",
 		"package": "pnpm --filter @gradio/* --filter=!@gradio/client --filter=!@gradio/preview exec svelte-package --input=. --tsconfig=../../tsconfig.json",
 		"spaces:dev": "pnpm css && pnpm --filter @gradio/preview build && pnpm --filter @self/spaces-test dev"
@@ -38,12 +37,11 @@
 		"@csstools/postcss-global-data": "^3.1.0",
 		"@gradio/client": "workspace:^",
 		"@manypkg/get-packages": "^3.1.0",
-		"@playwright/experimental-ct-svelte": "^1.56.0",
-		"@playwright/test": "^1.56.0",
+		"@playwright/test": "^1.60.0",
 		"@self/build": "workspace:^",
 		"@self/tootils": "workspace:^",
 		"@sveltejs/package": "^2.5.7",
-		"@sveltejs/vite-plugin-svelte": "^6.2.1",
+		"@sveltejs/vite-plugin-svelte": "^7.0.0",
 		"@tailwindcss/forms": "^0.5.10",
 		"@testing-library/dom": "^10.4.1",
 		"@testing-library/jest-dom": "^6.9.1",
@@ -51,7 +49,7 @@
 		"@types/testing-library__jest-dom": "^6.0.0",
 		"@typescript-eslint/eslint-plugin": "^8.46.0",
 		"@typescript-eslint/parser": "^8.46.0",
-		"@vitest/browser-playwright": "^4.0.18",
+		"@vitest/browser-playwright": "^4.1.5",
 		"autoprefixer": "^10.4.21",
 		"cross-env": "^10.1.0",
 		"esbuild": "^0.25.10",
@@ -65,7 +63,7 @@
 		"msw": "^2.11.3",
 		"node-html-parser": "^7.0.1",
 		"npm-run-all2": "^8.0.4",
-		"playwright": "^1.56.0",
+		"playwright": "^1.60.0",
 		"plotly.js-dist-min": "^3.1.1",
 		"polka": "1.0.0-next.25",
 		"pollen-css": "^5.0.2",
@@ -78,8 +76,8 @@
 		"prettier-plugin-svelte": "^3.4.0",
 		"sirv": "^3.0.2",
 		"sirv-cli": "^3.0.1",
-		"svelte": "^5.48.0",
-		"svelte-check": "^4.3.2",
+		"svelte": "^5.55.4",
+		"svelte-check": "^4.4.6",
 		"svelte-eslint-parser": "^1.3.3",
 		"svelte-i18n": "^4.0.1",
 		"svelte-preprocess": "^6.0.3",
@@ -87,13 +85,14 @@
 		"tinyspy": "^4.0.4",
 		"typescript": "^5.9.3",
 		"typescript-svelte-plugin": "^0.3.50",
-		"vite": "^7.1.9",
+		"vite": "^8.0.9",
 		"vite-plugin-turbosnap": "1.0.3",
 		"vitefu": "^1.1.3",
-		"vitest": "^4.0.18"
+		"vitest": "^4.1.5"
 	},
 	"devDependencies": {
 		"@chromatic-com/storybook": "^4.1.3",
+		"@eslint/js": "^9.39.2",
 		"@gradio/accordion": "workspace:^",
 		"@gradio/annotatedimage": "workspace:^",
 		"@gradio/audio": "workspace:^",
@@ -152,18 +151,19 @@
 		"@gradio/uploadbutton": "workspace:^",
 		"@gradio/vibeeditor": "workspace:^",
 		"@gradio/video": "workspace:^",
+		"@gradio/workflowcanvas": "workspace:^",
 		"@storybook/addon-a11y": "^10.1.11",
 		"@storybook/addon-docs": "^10.1.11",
 		"@storybook/addon-svelte-csf": "^5.0.10",
 		"@storybook/addon-vitest": "^10.1.11",
 		"@storybook/svelte-vite": "^10.1.11",
 		"@testing-library/user-event": "^14.6.1",
-		"@vitest/browser": "^3.2.4",
+		"@vitest/browser": "^4.1.5",
 		"@vitest/coverage-v8": "^3.2.4",
 		"eslint-plugin-jsdoc": "^61.0.0",
 		"eslint-plugin-storybook": "^10.1.11",
 		"storybook": "^10.1.11",
-		"vitest-browser-svelte": "^0.1.0",
+		"vitest-browser-svelte": "^2.1.1",
 		"wikidata-lang": "5.0.1"
 	},
 	"engines": {
@@ -175,5 +175,10 @@
 		"extends": [
 			"plugin:storybook/recommended"
 		]
+	},
+	"pnpm": {
+		"overrides": {
+			"svelte": "5.48.0"
+		}
 	}
 }

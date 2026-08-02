@@ -1,5 +1,51 @@
 # @gradio/tabitem
 
+## 0.8.3
+
+### Fixes
+
+- [#13644](https://github.com/gradio-app/gradio/pull/13644) [`f0abb1e`](https://github.com/gradio-app/gradio/commit/f0abb1ea8e61f4b886296365639b9fe0492012a9) - restore shared props lost during frontend prop partitioning.  Thanks @dawoodkhan82!
+
+### Dependency updates
+
+- @gradio/utils@0.14.0
+- @gradio/column@0.4.1
+- @gradio/tabs@0.10.0
+
+## 0.8.2
+
+### Dependency updates
+
+- @gradio/tabs@0.9.0
+
+## 0.8.1
+
+### Dependency updates
+
+- @gradio/utils@0.13.0
+- @gradio/column@0.4.0
+- @gradio/tabs@0.8.0
+
+## 0.8.0
+
+### Features
+
+- [#13509](https://github.com/gradio-app/gradio/pull/13509) [`dcd072c`](https://github.com/gradio-app/gradio/commit/dcd072cd57f09ffd2dc5f97ae6afc505894824a6) - Migrate Chatbot, Tabs, TabItem to Svelte 5.  Thanks @dawoodkhan82!
+
+### Dependency updates
+
+- @gradio/tabs@0.7.0
+
+## 0.7.0
+
+### Features
+
+- [#13467](https://github.com/gradio-app/gradio/pull/13467) [`feba2e1`](https://github.com/gradio-app/gradio/commit/feba2e1e41c68f4bbdacf4c963d8d9689d4b3346) - `Tab`, `TabItem`, `Plot` Unit tests.  Thanks @dawoodkhan82!
+
+### Dependency updates
+
+- @gradio/tabs@0.6.0
+
 ## 0.6.6
 
 ### Dependency updates

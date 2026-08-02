@@ -29,7 +29,7 @@ from gradio import blocks, helpers
 from gradio.context import LocalContext
 from gradio.data_classes import GradioModel, GradioRootModel
 from gradio.events import SelectData
-from gradio.exceptions import DuplicateBlockError
+from gradio.exceptions import ComponentProcessingError, DuplicateBlockError
 from gradio.route_utils import API_PREFIX
 from gradio.utils import assert_configs_are_equivalent_besides_ids, cancel_tasks
 
@@ -95,6 +95,59 @@ class TestBlocksMethods:
             component["props"]["proxy_url"] = f"{fake_url}/"
         config2 = demo2.get_config_file()
         assert assert_configs_are_equivalent_besides_ids(config1, config2)
+
+    def test_from_config_rejects_non_hf_space_proxy_url(self):
+        """`Blocks.from_config()` must only register `proxy_url`s whose host
+        ends in `.hf.space` — otherwise a malicious config (or a malicious
+        `gr.load()` source) could seed `blocks.proxy_urls` with internal /
+        SSRF targets that `App.build_proxy_request` would later treat as
+        legitimate. Regression coverage for GHSA-jmh7-g254-2cq9.
+        """
+
+        def update(name):
+            return f"Welcome to Gradio, {name}!"
+
+        with gr.Blocks() as demo:
+            inp = gr.Textbox(placeholder="What is your name?")
+            out = gr.Textbox()
+            inp.submit(fn=update, inputs=inp, outputs=out, api_name="greet")
+
+        config = demo.get_config_file()
+
+        # 1. Top-level non-.hf.space proxy_url must not be registered.
+        blocks1 = gr.Blocks.from_config(config, [update], "http://169.254.169.254")
+        assert blocks1.proxy_urls == set()
+
+        # 2. Suffix-confusion attempt (`.hf.space.evil.com`) must be rejected
+        # by the `str.endswith(".hf.space")` guard.
+        blocks2 = gr.Blocks.from_config(
+            config, [update], "https://victim.hf.space.evil.com"
+        )
+        assert blocks2.proxy_urls == set()
+
+        # 3. Child components carrying a malicious `proxy_url` in their
+        # props (e.g. via a tampered remote `gr.load()` config) must also
+        # be filtered, even when the top-level `proxy_url` is legitimate.
+        poisoned_config = copy.deepcopy(config)
+        for component in poisoned_config["components"]:
+            component["props"]["proxy_url"] = "http://internal-service.local/"
+        blocks3 = gr.Blocks.from_config(
+            poisoned_config, [update], "https://benign.hf.space"
+        )
+        assert blocks3.proxy_urls == {"https://benign.hf.space"}
+        assert all(
+            not url.startswith("http://internal-service.local")
+            for url in blocks3.proxy_urls
+        )
+
+        # 4. Legitimate `.hf.space` hosts on both top-level and children
+        # are registered (positive control).
+        good_config = copy.deepcopy(config)
+        for component in good_config["components"]:
+            component["props"]["proxy_url"] = "https://child.hf.space/"
+        blocks4 = gr.Blocks.from_config(good_config, [update], "https://root.hf.space")
+        assert "https://root.hf.space" in blocks4.proxy_urls
+        assert "https://child.hf.space/" in blocks4.proxy_urls
 
     def test_load_from_config_with_blocks_events(self):
         fake_url = "https://fake.hf.space"
@@ -691,6 +744,28 @@ class TestBlocksPostprocessing:
         assert output[0] == 23
 
     @pytest.mark.asyncio
+    async def test_blocks_matches_stale_returned_component_by_key(self):
+        # If the app is hot-reloaded while a prediction is in flight, the
+        # function may return components created by a previous version of
+        # the app. They should be matched to the current output components
+        # by key. See https://github.com/gradio-app/gradio/issues/8712
+        with gr.Blocks():
+            stale_num = gr.Number(key="num")
+            unkeyed_num = gr.Number()
+
+        with gr.Blocks() as demo:
+            num = gr.Number(key="num")
+            update = gr.Button(value="update")
+            update.click(lambda: {num: 42}, inputs=[], outputs=[num])
+
+        assert stale_num._id != num._id
+        output = await demo.postprocess_data(demo.fns[0], {stale_num: 42}, state=None)
+        assert output[0] == 42
+
+        with pytest.raises(ValueError, match="not specified as output"):
+            await demo.postprocess_data(demo.fns[0], {unkeyed_num: 42}, state=None)
+
+    @pytest.mark.asyncio
     async def test_blocks_update_dict_without_postprocessing(self, media_data):
         def infer(x):
             return media_data.BASE64_IMAGE, gr.update(visible=True)
@@ -841,6 +916,49 @@ class TestBlocksPostprocessing:
             ValueError,
         ):
             await demo.postprocess_data(demo.fns[0], predictions=[1, 2], state=None)
+
+    @pytest.mark.asyncio
+    async def test_helpful_error_when_output_is_mistyped(self):
+        def process_images(n, t):
+            return n, t
+
+        with gr.Blocks() as demo:
+            number = gr.Number(precision=0)
+            textbox = gr.Textbox()
+            btn = gr.Button()
+            btn.click(process_images, [number, textbox], [number, textbox])
+
+        with pytest.raises(ComponentProcessingError) as exc_info:
+            await demo.postprocess_data(
+                demo.fns[0], predictions=[{"foo": "bar"}, "a"], state=None
+            )
+        message = str(exc_info.value)
+        assert "index 0" in message
+        assert "number" in message
+        assert "process_images" in message
+        assert "{'foo': 'bar'}" in message
+        assert isinstance(exc_info.value.__cause__, TypeError)
+
+    @pytest.mark.asyncio
+    async def test_helpful_error_when_input_is_mistyped(self):
+        def process_images(n, s):
+            return n, s
+
+        with gr.Blocks() as demo:
+            number = gr.Number()
+            slider = gr.Slider()
+            btn = gr.Button()
+            btn.click(process_images, [number, slider], [number, slider])
+
+        with pytest.raises(ComponentProcessingError) as exc_info:
+            await demo.preprocess_data(
+                demo.fns[0], inputs=[1, {"foo": "bar"}], state=None
+            )
+        message = str(exc_info.value)
+        assert "index 1" in message
+        assert "slider" in message
+        assert "process_images" in message
+        assert isinstance(exc_info.value.__cause__, TypeError)
 
     @pytest.mark.asyncio
     async def test_dataset_is_updated(self):

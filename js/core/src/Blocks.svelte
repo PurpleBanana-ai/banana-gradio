@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tick, onMount, setContext, settled, untrack } from "svelte";
+	import type { Component } from "svelte";
 	import { _ } from "svelte-i18n";
 	import { Client } from "@gradio/client";
 	import { writable } from "svelte/store";
@@ -18,10 +19,6 @@
 	import { prefix_css } from "./css";
 	import { reactive_formatter } from "./gradio_helper";
 
-	import type ApiDocsInterface from "./api_docs/ApiDocs.svelte";
-	import type ApiRecorderInterface from "./api_docs/ApiRecorder.svelte";
-	import type SettingsInterface from "./api_docs/Settings.svelte";
-
 	import logo from "./images/logo.svg";
 	import api_logo from "./api_docs/img/api-logo.svg";
 	import settings_logo from "./api_docs/img/settings-logo.svg";
@@ -31,6 +28,15 @@
 	import * as screen_recorder from "./screen_recorder";
 
 	import { DependencyManager } from "./dependency";
+	type AddNewMessage = (
+		title: string,
+		message: string,
+		fn_index: number,
+		type: ToastMessage["type"],
+		duration?: number | null,
+		visible?: boolean
+	) => void;
+
 	let {
 		root,
 		components,
@@ -55,7 +61,7 @@
 		css,
 		vibe_mode,
 		search_params,
-		render_complete = false,
+		render_complete = $bindable(false),
 		ready = $bindable(false),
 		reload_count = $bindable(0),
 		add_new_message = $bindable()
@@ -86,13 +92,18 @@
 		render_complete: boolean;
 		ready: boolean;
 		reload_count: number;
-		add_new_message: (title: string, message: string, type: string) => void;
+		add_new_message: AddNewMessage;
 	} = $props();
 
 	components.forEach((comp) => {
 		if (!comp.props.i18n) {
 			comp.props.i18n = $reactive_formatter;
 		}
+		// Inject the live formatter store so components can re-translate their
+		// props when the locale changes at runtime. This must come from core,
+		// which owns the canonical svelte-i18n instance — @gradio/utils resolves
+		// its own duplicate copy whose locale store is never updated.
+		comp.props.i18n_store = reactive_formatter;
 	});
 
 	let messages: (ToastMessage & { fn_index: number })[] = $state([]);
@@ -136,14 +147,6 @@
 			const button_id = (data as { id: number }).id;
 			dispatch_to_target(button_id, "click", null);
 		} else {
-			// Tabs are a bit weird. The Tabs component dispatches 'select' events
-			// but the target id corresponds to the child Tab component that was selected.
-			// So the id we get from the dispatcher belongs to the Tabs,
-			// so we need to pull out the correct id here.
-			if (event === "select" && id in app_tree.initial_tabs) {
-				// this is the id of the selected tab
-				id = (data as { id: number }).id;
-			}
 			dep_manager.dispatch({
 				type: "event",
 				event_name: event,
@@ -160,6 +163,7 @@
 		{
 			root,
 			theme: theme_mode,
+			theme_mode,
 			version,
 			api_prefix,
 			max_file_size,
@@ -241,6 +245,7 @@
 			app_tree.reload(components, layout, dependencies, {
 				root,
 				theme: theme_mode,
+				theme_mode,
 				version,
 				api_prefix,
 				max_file_size,
@@ -271,9 +276,9 @@
 	let allow_video_trim = true;
 
 	// Lazy component loading state
-	let ApiDocs: ComponentType<ApiDocsInterface> | null = null;
-	let ApiRecorder: ComponentType<ApiRecorderInterface> | null = null;
-	let Settings: ComponentType<SettingsInterface> | null = null;
+	let ApiDocs: Component<any> | null = null;
+	let ApiRecorder: Component<any> | null = null;
+	let Settings: Component<any> | null = null;
 	let VibeEditor: any = $state(null);
 
 	async function loadApiDocs(): Promise<void> {
@@ -398,12 +403,42 @@
 		return container.children[container.children.length - 1] as HTMLElement;
 	}
 
+	let last_reported_height = 0;
+	let consecutive_grows = 0;
+
 	function handle_resize(): void {
-		if ("parentIFrame" in window) {
-			const box = root_container.children[0].getBoundingClientRect();
-			if (!box) return;
-			window.parentIFrame?.size(box.bottom + footer_height + 32);
+		if (!("parentIFrame" in window)) return;
+		const box = root_container.children[0].getBoundingClientRect();
+		if (!box) return;
+		const next = box.bottom + footer_height + 32;
+		const viewport = window.innerHeight;
+
+		// Ignore sub-pixel echoes from our own resize.
+		if (Math.abs(next - last_reported_height) < 2) {
+			consecutive_grows = 0;
+			return;
 		}
+
+		if (next > last_reported_height) {
+			// Content sized in viewport-relative units (`vh`/`%`) or stretched by
+			// `fill_height` grows to fill whatever height the iframe is given, so its
+			// measured bottom just tracks the viewport. Requesting a larger size in
+			// that case feeds back into an unbounded growth loop (#12089, #12992).
+			// (a) If the content merely fills the viewport (no real overflow), don't grow.
+			if (next > viewport && box.bottom <= viewport + 2) return;
+			// (b) Circuit breaker: if we keep growing tick after tick, the content is
+			// tracking the iframe we just grew (a feedback loop), not genuinely taller
+			// content. Stop growing so the height stays bounded. Legitimate content
+			// (late-loading images, revealed blocks) settles within a few grows.
+			consecutive_grows += 1;
+			if (consecutive_grows > 4) return;
+		} else {
+			// Shrinking to fit shorter content is always safe and breaks any loop.
+			consecutive_grows = 0;
+		}
+
+		last_reported_height = next;
+		window.parentIFrame?.size(next);
 	}
 
 	function screen_recording(): void {

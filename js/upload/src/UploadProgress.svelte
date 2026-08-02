@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { FileData, type Client } from "@gradio/client";
 	import { onMount, onDestroy } from "svelte";
+	import { resolve_current_origin_url } from "@gradio/utils";
 
 	type FileDataWithProgress = FileData & { progress: number };
 
@@ -21,8 +22,6 @@
 	let stream: Awaited<ReturnType<Client["stream"]>>;
 	let progress = $state(false);
 	let current_file_upload = $state<FileDataWithProgress>();
-	let file_to_display = $derived(current_file_upload || files_with_progress[0]);
-
 	let files_with_progress = $state<FileDataWithProgress[]>(
 		files.map((file) => {
 			return {
@@ -31,6 +30,7 @@
 			};
 		})
 	);
+	let file_to_display = $derived(current_file_upload || files_with_progress[0]);
 
 	function handleProgress(filename: string, chunk_size: number): void {
 		// Find the corresponding file in the array and update its progress
@@ -47,9 +47,11 @@
 	}
 
 	onMount(async () => {
-		stream = await stream_handler(
-			new URL(`${root}/gradio_api/upload_progress?upload_id=${upload_id}`)
+		const upload_progress_url = resolve_current_origin_url(
+			root,
+			`/gradio_api/upload_progress?upload_id=${upload_id}`
 		);
+		stream = await stream_handler(upload_progress_url);
 
 		if (stream == null) {
 			throw new Error("Event source is not defined");

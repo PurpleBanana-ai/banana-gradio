@@ -73,7 +73,12 @@ export default defineConfig(({ mode, isSsrBuild }) => {
 			target: "esnext",
 			minify: production,
 			outDir: "../../gradio/templates/frontend",
-			rollupOptions: {
+			// rollupOptions: {
+			// 	external: ["virtual:cc-init"]
+			// }
+			//
+
+			rolldownOptions: {
 				external: ["virtual:cc-init"]
 			}
 		},
@@ -110,6 +115,7 @@ export default defineConfig(({ mode, isSsrBuild }) => {
 			}
 		},
 		plugins: [
+			handle_cc_init(),
 			handle_msw_imports(),
 			svelte_plugin({
 				inspector: false,
@@ -152,7 +158,24 @@ export default defineConfig(({ mode, isSsrBuild }) => {
 				"@ffmpeg/ffmpeg",
 				"@ffmpeg/util",
 				"chromium-bidi",
-				"esbuild"
+				"esbuild",
+				"virtual:cc-init"
+			],
+			// Pre-declare dynamic-import deps so they end up in the same
+			// optimizer batch as static-scanned deps. Vitest browser mode
+			// can't tolerate mid-suite force-reloads — the orchestrator's
+			// iframe.onload has no timeout — and discovering dynamic deps
+			// later in the run would force-reload and hang. The cold-start
+			// reload that fires once when this list is committed happens
+			// before iframes start running tests, so it's harmless. CI
+			// caches `node_modules/.vite` so even that one reload is rare.
+			include: [
+				"katex/contrib/auto-render",
+				"mermaid",
+				"vega-embed",
+				"@babylonjs/viewer",
+				"extendable-media-recorder",
+				"extendable-media-recorder-wav-encoder"
 			]
 		},
 		resolve: {
@@ -166,7 +189,15 @@ export default defineConfig(({ mode, isSsrBuild }) => {
 				TEST_MODE === "node"
 					? ["**/*.node-test.{js,mjs,cjs,ts,mts,cts,jsx,tsx}"]
 					: ["**/*.test.{js,mjs,cjs,ts,mts,cts,jsx,tsx}"],
-			exclude: ["**/node_modules/**", "**/gradio/gradio/**", "**/client/js/**"],
+			exclude: [
+				"**/node_modules/**",
+				"**/gradio/gradio/**",
+				"**/client/js/**",
+				"js/app/proxy_routes.test.js",
+				"**/.svelte-kit/**",
+				"**/dist/**",
+				".venv/**"
+			],
 			globals: true,
 
 			onConsoleLog(log, type) {
@@ -227,6 +258,19 @@ function handle_msw_imports(): Plugin {
 					console.warn("Failed to resolve msw/node:", e);
 					return null;
 				}
+			}
+			return null;
+		}
+	};
+}
+
+function handle_cc_init(): Plugin {
+	return {
+		name: "handle_cc_init",
+		enforce: "pre",
+		resolveId(id, importer, options) {
+			if (id === "virtual:cc-init") {
+				return { external: true, id: "virtual:cc-init" };
 			}
 			return null;
 		}

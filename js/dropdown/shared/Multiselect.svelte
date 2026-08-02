@@ -14,10 +14,20 @@
 	let filter_input: HTMLElement;
 	let input_text = $state("");
 	let label = $derived(gradio.shared.label || "Multiselect");
+
+	const uid = $props.id();
+	const listbox_id = `${uid}-options`;
 	let buttons = $derived(gradio.props.buttons);
 
+	// Translate the display side only; values stay raw for event payloads.
+	let translated_choices: [string, string | number][] = $derived.by(() => {
+		return gradio.props.choices.map(
+			([display, value]) =>
+				[gradio.live_i18n(display), value] as [string, string | number]
+		);
+	});
 	let choices_names: string[] = $derived.by(() => {
-		return gradio.props.choices.map((c) => c[0]);
+		return translated_choices.map((c) => c[0]);
 	});
 	let choices_values: (string | number)[] = $derived.by(() => {
 		return gradio.props.choices.map((c) => c[1]);
@@ -29,7 +39,7 @@
 
 	// All of these are indices with respect to the choices array
 	let [filtered_indices, active_index] = $derived.by(() => {
-		const filtered = handle_filter(gradio.props.choices, input_text);
+		const filtered = handle_filter(translated_choices, input_text);
 		return [
 			filtered,
 			filtered.length > 0 && !gradio.props.allow_custom_value
@@ -235,6 +245,14 @@
 			{/each}
 			<div class="secondary-wrap">
 				<input
+					role="combobox"
+					aria-controls={listbox_id}
+					aria-expanded={show_options}
+					aria-activedescendant={show_options && active_index !== null
+						? `${listbox_id}-option-${active_index}`
+						: undefined}
+					aria-autocomplete={gradio.props.filterable ? "list" : "none"}
+					aria-label={label}
 					class="border-none"
 					class:subdued={(!choices_names.includes(input_text) &&
 						!gradio.props.allow_custom_value) ||
@@ -278,11 +296,12 @@
 		</div>
 		<DropdownOptions
 			{show_options}
-			choices={gradio.props.choices}
+			choices={translated_choices}
 			{filtered_indices}
 			{disabled}
 			{selected_indices}
 			{active_index}
+			{listbox_id}
 			remember_scroll={true}
 			onchange={handle_option_selected}
 		/>

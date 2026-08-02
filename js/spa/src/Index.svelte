@@ -1,6 +1,10 @@
 <script context="module" lang="ts">
 	import { writable } from "svelte/store";
-	import { mount_css, prefix_css } from "@gradio/core";
+	import {
+		mount_css,
+		prefix_css,
+		resolve_current_origin_url
+	} from "@gradio/core";
 
 	import type { Client as ClientType } from "@gradio/client";
 
@@ -148,7 +152,10 @@
 			);
 		}
 		await mount_css(
-			config.root + "/theme.css?v=" + config.theme_hash,
+			resolve_current_origin_url(
+				config.root,
+				`/theme.css?v=${config.theme_hash}`
+			).toString(),
 			document.head
 		);
 		if (!config.stylesheets) return;
@@ -161,7 +168,9 @@
 					return mount_css(stylesheet, document.head);
 				}
 
-				return fetch(config.root + "/" + stylesheet)
+				return fetch(
+					resolve_current_origin_url(config.root, stylesheet).toString()
+				)
 					.then((response) => response.text())
 					.then((css_string) => {
 						prefix_css(css_string, version);
@@ -181,6 +190,11 @@
 			if (parsed_head_html) {
 				for (let head_element of parsed_head_html) {
 					let newElement = document.createElement(head_element.tagName);
+					if (newElement.tagName === "SCRIPT") {
+						// Created scripts default to force-async; restore document order
+						// (an explicit `async` attribute is re-applied just below).
+						(newElement as HTMLScriptElement).async = false;
+					}
 					Array.from(head_element.attributes).forEach((attr) => {
 						newElement.setAttribute(attr.name, attr.value);
 					});
@@ -289,14 +303,23 @@
 
 	let pending_deep_link_error = false;
 
-	let new_message_fn: (title: string, message: string, type: string) => void;
+	type AddNewMessage = (
+		title: string,
+		message: string,
+		fn_index: number,
+		type: "info" | "error" | "success" | "warning",
+		duration?: number | null,
+		visible?: boolean
+	) => void;
+
+	let new_message_fn: AddNewMessage;
 
 	$: if (new_message_fn && pending_deep_link_error) {
 		new_message_fn("Error", "Deep link was not valid", -1, "error", 10, true);
 		pending_deep_link_error = false;
 	}
 
-	let reload_count: number = 0;
+	let reload_count = 0;
 
 	onMount(async () => {
 		active_theme_mode = handle_theme_mode(wrapper);
@@ -334,7 +357,7 @@
 			throw new Error("Could not resolve app config");
 		}
 
-		config = app.get_url_config();
+		config = app.get_url_config() as unknown as Config;
 		window.__gradio_space__ = config.space_id;
 
 		if (app.config?.i18n_translations) {
@@ -396,26 +419,29 @@
 					}
 				});
 				stream.addEventListener("reload", async (event) => {
-					app.close();
-					app = await Client.connect(api_url, {
-						status_callback: handle_status,
-						with_null_state: true,
-						events: ["data", "log", "status", "render"],
-						session_hash: app.session_hash
-					});
-
-					if (!app.config) {
-						throw new Error("Could not resolve app config");
+					try {
+						// Soft-reload: refresh config in place so in-flight SSE
+						// streams (and generators) keep working across the reload.
+						const refreshed_config = await app.refresh();
+						await mount_custom_css(refreshed_config.css);
+						await add_custom_html_head(refreshed_config.head);
+						config = refreshed_config as unknown as Config;
+						window.__gradio_space__ = config.space_id;
+						css_ready = true;
+						window.__is_colab__ = config.is_colab;
+						reload_count += 1;
+						dispatch("loaded");
+					} catch (error) {
+						new_message_fn(
+							"Error",
+							"Error reloading app",
+							-1,
+							"error",
+							10,
+							true
+						);
+						console.error("Error reloading app:", error);
 					}
-
-					config = app.get_url_config();
-					window.__gradio_space__ = config.space_id;
-					await mount_custom_css(config.css);
-					await add_custom_html_head(config.head);
-					css_ready = true;
-					window.__is_colab__ = config.is_colab;
-					reload_count += 1;
-					dispatch("loaded");
 				});
 			}, 200);
 		}
@@ -592,7 +618,7 @@
 				{app}
 				{...config}
 				bind:ready
-				fill_height={!is_embed && config.fill_height}
+				fill_height={!is_embed && !!config.fill_height}
 				theme_mode={active_theme_mode}
 				{control_page_title}
 				target={wrapper}
@@ -601,6 +627,7 @@
 				bind:add_new_message={new_message_fn}
 				footer_links={is_embed ? [] : config.footer_links}
 				{app_mode}
+				vibe_mode={false}
 				{version}
 				api_prefix={config.api_prefix || ""}
 				max_file_size={config.max_file_size}

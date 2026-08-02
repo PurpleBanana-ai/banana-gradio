@@ -31,7 +31,7 @@
 		i18n: I18nFormatter;
 		dispatch_blob: (
 			blobs: Uint8Array[] | Blob[],
-			event: "stream" | "change" | "stop_recording"
+			event: "stream" | "change"
 		) => Promise<void> | undefined;
 		waveform_settings: Record<string, any>;
 		waveform_options?: WaveformOptions;
@@ -99,7 +99,7 @@
 			if (audio_buffer)
 				await process_audio(audio_buffer).then(async (audio: Uint8Array) => {
 					await dispatch_blob([audio], "change");
-					await dispatch_blob([audio], "stop_recording");
+					onstoprecording?.();
 				});
 		} catch (e) {
 			console.error(e);
@@ -201,7 +201,7 @@
 			await process_audio(decodedData, start, end).then(
 				async (trimmedAudio: Uint8Array) => {
 					await dispatch_blob([trimmedAudio], "change");
-					await dispatch_blob([trimmedAudio], "stop_recording");
+					onstoprecording?.();
 					recordingWaveform?.destroy();
 					create_recording_waveform();
 				}
@@ -217,10 +217,12 @@
 				recordingContainer &&
 				recordingContainer.contains(document.activeElement);
 			if (!is_focused_in_waveform) return;
+			const waveform = recordingWaveform;
+			if (!waveform) return;
 			if (e.key === "ArrowRight") {
-				skip_audio(recordingWaveform, 0.1);
+				skip_audio(waveform, 0.1);
 			} else if (e.key === "ArrowLeft") {
-				skip_audio(recordingWaveform, -0.1);
+				skip_audio(waveform, -0.1);
 			}
 		});
 	});
@@ -252,7 +254,7 @@
 
 	{#if record_mounted && !recordedAudio}
 		<WaveformRecordControls
-			{record}
+			record={record!}
 			{i18n}
 			{timing}
 			{recording}

@@ -1,5 +1,12 @@
+<script module lang="ts">
+	// Shared across instances so a component whose head script was already
+	// added by another instance can await that in-flight load instead of
+	// running js_on_load before the script has executed.
+	const head_script_loads = new Map<string, Promise<void>>();
+</script>
+
 <script lang="ts">
-	import { createEventDispatcher } from "svelte";
+	import { createEventDispatcher, onDestroy } from "svelte";
 	import Handlebars from "handlebars";
 	import type { Snippet } from "svelte";
 
@@ -16,8 +23,6 @@
 		component_class_name = "HTML",
 		upload = null,
 		server = {},
-		watch_fn = (_propOrProps: string | string[], _callback: () => void) => {},
-		fire_watchers = (_changedKeys: string[]) => {},
 		children
 	}: {
 		elem_classes: string[];
@@ -25,14 +30,13 @@
 		html_template: string;
 		css_template: string;
 		js_on_load: string | null;
+		head?: string | null;
 		visible: boolean;
 		autoscroll: boolean;
 		apply_default_css: boolean;
 		component_class_name: string;
 		upload: ((file: File) => Promise<{ path: string; url: string }>) | null;
 		server: Record<string, (...args: any[]) => Promise<any>>;
-		watch_fn?: (propOrProps: string | string[], callback: () => void) => void;
-		fire_watchers?: (changedKeys: string[]) => void;
 		children?: Snippet;
 	} = $props();
 
@@ -47,6 +51,29 @@
 	);
 
 	let old_props = $state($state.snapshot(props));
+	type WatchEntry = { props: string[]; callback: () => void };
+	let watch_entries: WatchEntry[] = [];
+
+	function watch(propOrProps: string | string[], callback: () => void): void {
+		const prop_list = Array.isArray(propOrProps) ? propOrProps : [propOrProps];
+		watch_entries.push({ props: prop_list, callback });
+	}
+
+	function fire_watchers(changed_keys: string[]): void {
+		const seen = new Set<WatchEntry>();
+		for (const entry of watch_entries) {
+			if (entry.props.some((k) => changed_keys.includes(k))) {
+				seen.add(entry);
+			}
+		}
+		for (const entry of seen) {
+			try {
+				entry.callback();
+			} catch (e) {
+				console.error("Error in watch callback:", e);
+			}
+		}
+	}
 
 	const dispatch = createEventDispatcher<{
 		event: { type: "click" | "submit"; data: any };
@@ -173,6 +200,8 @@
 		}
 	}
 
+	onDestroy(() => style_element?.remove());
+
 	function updateDOM(
 		_element: HTMLElement | undefined,
 		oldHtml: string,
@@ -202,7 +231,6 @@
 		}
 	}
 
-	// eslint-disable-next-line complexity
 	function updateNode(oldNode: Node, newNode: Node): void {
 		if (
 			oldNode.nodeType === Node.TEXT_NODE &&
@@ -320,31 +348,50 @@
 		const promises: Promise<void>[] = [];
 		for (const el of Array.from(doc.head.children)) {
 			if (el.tagName === "SCRIPT") {
-				const src = (el as HTMLScriptElement).src;
+				const parsed_script = el as HTMLScriptElement;
+				const src = parsed_script.src;
 				if (src) {
-					if (document.querySelector(`script[src="${src}"]`)) continue;
+					const in_flight = head_script_loads.get(src);
+					if (in_flight) {
+						promises.push(in_flight);
+						continue;
+					}
+					// selector-free dedupe: author-provided src may contain `]` etc.
+					// that would break a querySelector string.
+					if (Array.from(document.scripts).some((s) => s.src === src)) continue;
 					const script = document.createElement("script");
+					// Created scripts default to force-async; copy the author's intent
+					// so a plain <script src> keeps document order.
+					script.async = (el as HTMLScriptElement).async;
 					script.src = src;
-					promises.push(
-						new Promise<void>((resolve, reject) => {
-							script.onload = () => resolve();
-							script.onerror = () =>
-								reject(new Error(`Failed to load script: ${src}`));
-						})
-					);
+					const load = new Promise<void>((resolve, reject) => {
+						script.onload = () => resolve();
+						script.onerror = () =>
+							reject(new Error(`Failed to load script: ${src}`));
+					});
+					head_script_loads.set(src, load);
+					promises.push(load);
 					document.head.appendChild(script);
 				} else {
+					if (
+						Array.from(document.scripts).some(
+							(s) => !s.src && s.textContent === parsed_script.textContent
+						)
+					) {
+						continue;
+					}
 					const script = document.createElement("script");
-					script.textContent = el.textContent;
+					script.textContent = parsed_script.textContent;
 					document.head.appendChild(script);
 				}
 			} else {
-				const existing =
-					el.tagName === "LINK" && (el as HTMLLinkElement).href
-						? document.querySelector(
-								`link[href="${(el as HTMLLinkElement).href}"]`
-							)
-						: null;
+				// selector-free dedupe, same reason as the script[src] check above.
+				const href = el.tagName === "LINK" ? (el as HTMLLinkElement).href : "";
+				const existing = href
+					? Array.from(document.querySelectorAll("link")).some(
+							(l) => (l as HTMLLinkElement).href === href
+						)
+					: false;
 				if (!existing) {
 					document.head.appendChild(el.cloneNode(true));
 				}
@@ -424,7 +471,7 @@
 						"watch",
 						js_on_load
 					);
-					func(element, trigger, reactiveProps, server, upload_func, watch_fn);
+					func(element, trigger, reactiveProps, server, upload_func, watch);
 				} catch (error) {
 					console.error("Error executing js_on_load:", error);
 				}

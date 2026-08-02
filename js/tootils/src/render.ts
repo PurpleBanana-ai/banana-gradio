@@ -5,6 +5,10 @@ import {
 } from "@testing-library/dom";
 import { tick, mount, unmount } from "svelte";
 import type { SvelteComponent, Component } from "svelte";
+// @ts-ignore — `proxy` is the runtime implementation behind `$state(...)`.
+// Using it directly keeps this file as plain `.ts` instead of `.svelte.ts`,
+// which intermittently fails to load in CI under concurrent test-file imports.
+import { proxy } from "svelte/internal/client";
 
 import type {
 	queries,
@@ -14,13 +18,16 @@ import type {
 } from "@testing-library/dom";
 import { vi, type Mock } from "vitest";
 import { GRADIO_ROOT, allowed_shared_props } from "@gradio/utils";
-import type { LoadingStatus, ILoadingStatus } from "@gradio/statustracker";
+import type { ILoadingStatus as LoadingStatus } from "@gradio/statustracker";
 import { _ } from "svelte-i18n";
 
 const containerCache = new Map();
 const componentCache = new Set();
 
-type ComponentType<T extends SvelteComponent, Props> = Component<Props>;
+type ComponentType<
+	T extends SvelteComponent,
+	Props extends Record<string, any>
+> = Component<Props>;
 
 export type RenderResult<
 	C extends SvelteComponent,
@@ -31,30 +38,7 @@ export type RenderResult<
 	debug: (el?: HTMLElement | DocumentFragment) => void;
 	unmount: () => void;
 } & { [P in keyof Q]: BoundFunction<Q[P]> };
-export interface ILoadingStatus {
-	eta: number | null;
-	status: "pending" | "error" | "complete" | "generating" | "streaming";
-	queue: boolean;
-	queue_position: number | null;
-	queue_size?: number;
-	fn_index: number;
-	message?: string | null;
-	scroll_to_output?: boolean;
-	show_progress?: "full" | "minimal" | "hidden";
-	time_limit?: number | null | undefined;
-	progress?: {
-		progress: number | null;
-		index: number | null;
-		length: number | null;
-		unit: string | null;
-		desc: string | null;
-	}[];
-	validation_error?: string | null;
-	type: "input" | "output";
-	stream_state: "open" | "closed" | "waiting" | null;
-}
-
-const loading_status: ILoadingStatus = {
+const loading_status: LoadingStatus = {
 	eta: 0,
 	queue_position: 1,
 	queue_size: 1,
@@ -65,10 +49,10 @@ const loading_status: ILoadingStatus = {
 	validation_error: null,
 	type: "output",
 	stream_state: null,
-	status: "complete" as ILoadingStatus["status"],
+	status: "complete" as LoadingStatus["status"],
 	scroll_to_output: false,
 	fn_index: 0,
-	show_progress: "full" as ILoadingStatus["show_progress"]
+	show_progress: "full" as LoadingStatus["show_progress"]
 };
 
 export interface RenderOptions<Q extends Queries = typeof queries> {
@@ -124,7 +108,7 @@ export async function render<
 	};
 
 	const event_listeners = new Map<string, Set<(data: any) => void>>();
-	const event_buffer: Array<{ event: string; data: any }> = [];
+	const event_buffer: { event: string; data: any }[] = [];
 
 	function notify_listeners(event: string, data: any): void {
 		const listeners = event_listeners.get(event);
@@ -198,18 +182,24 @@ export async function render<
 		? props.loading_status
 		: loading_status;
 
-	const componentProps = {
+	// Wrap in a reactive proxy — the real app delivers `shared_props` /
+	// `props` from AppTree's `$state` tree (a deep proxy), and the Gradio
+	// class aliases those proxies directly. If we passed plain objects
+	// here, reactive reads of `gradio.shared.X` and `gradio.props.X` inside
+	// component templates wouldn't track, breaking effects that drive
+	// change/input dispatch. `proxy(...)` is the runtime form of `$state(...)`.
+	const componentProps = proxy({
 		shared_props: shared_props_obj,
 		props: {
 			...component_props_obj
 		},
 		...shared_props_obj
-	};
+	});
 
 	const component = mount(ComponentConstructor, {
 		target,
 		props: componentProps
-	}) as T;
+	} as any) as T;
 
 	containerCache.set(container, { target, component });
 	componentCache.add(component);

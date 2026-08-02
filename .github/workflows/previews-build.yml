@@ -45,6 +45,7 @@ jobs:
         uses: "gradio-app/gradio/.github/actions/install-all-deps@main"
         with:
           python_version: "3.12"
+          skip_docs_gen: true
       - name: install deps
         run: python -m pip install build
       - name: Build pr package
@@ -67,15 +68,10 @@ jobs:
         with:
           name: all_demos
           path: demo
-      - name: Create JS client tarball
-        id: create_js_tarball
-        continue-on-error: true
-        run: |
-          cd client/js
-          tarball_name=$(npm pack)
-          echo "tarball_name=client/js/$tarball_name" >> $GITHUB_OUTPUT
-      - name: Upload JS client tarball artifact
+      - name: Build JS client
+        run: pnpm --filter @gradio/client build
+      - name: Upload JS client dist artifact
         uses: actions/upload-artifact@v4
         with:
-          name: js-client-tarball
-          path: ${{ steps.create_js_tarball.outputs.tarball_name }}
+          name: js-client-dist
+          path: client/js/dist

@@ -15,7 +15,8 @@
 		line_breaks = true,
 		header_links = false,
 		allow_tags = false,
-		theme_mode = "system"
+		theme_mode = "system",
+		onload
 	}: {
 		chatbot?: boolean;
 		message: string;
@@ -30,6 +31,7 @@
 		header_links?: boolean;
 		allow_tags?: string[] | boolean | undefined;
 		theme_mode?: ThemeMode;
+		onload?: () => void;
 	} = $props();
 
 	let el: HTMLSpanElement;
@@ -40,11 +42,19 @@
 		latex_delimiters: latex_delimiters || []
 	});
 
-	let html: string = $derived.by(() => {
+	let html = $state("");
+	let render_token = 0;
+
+	$effect(() => {
+		const token = ++render_token;
 		if (message && message.trim()) {
-			return process_message(message);
+			process_message(message).then((result) => {
+				// drop results from superseded renders so streaming chunks
+				// don't clobber each other out of order
+				if (token === render_token) html = result;
+			});
 		} else {
-			return "";
+			html = "";
 		}
 	});
 	let katex_loaded = false;
@@ -100,7 +110,7 @@
 		return content;
 	}
 
-	function process_message(value: string): string {
+	async function process_message(value: string): Promise<string> {
 		let parsedValue = value;
 		if (render_markdown) {
 			const latexBlocks: string[] = [];
@@ -117,7 +127,7 @@
 				});
 			});
 
-			parsedValue = marked.parse(parsedValue) as string;
+			parsedValue = (await marked.parse(parsedValue)) as string;
 
 			parsedValue = parsedValue.replace(
 				/%%%LATEX_BLOCK_(\d+)%%%/g,
@@ -178,7 +188,7 @@
 
 	$effect(() => {
 		if (el && document.body.contains(el)) {
-			render_html(message);
+			render_html(message).then(() => onload?.());
 		} else {
 			console.error("Element is not in the DOM");
 		}
@@ -190,6 +200,13 @@
 </span>
 
 <style>
+	span {
+		/* `anywhere`, not `break-word`: it also lowers min-content width, so
+		   markdown in a table/flex container shrinks to fit instead of forcing
+		   the container to overflow. */
+		overflow-wrap: anywhere;
+	}
+
 	span :global(div[class*="code_wrap"]) {
 		position: relative;
 	}

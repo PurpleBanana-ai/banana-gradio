@@ -12,8 +12,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from gradio_client.exceptions import AppError
-from hypothesis import given, settings
-from hypothesis import strategies as st
+from hypothesis import given, settings  # ty: ignore[unresolved-import]
+from hypothesis import strategies as st  # ty: ignore[unresolved-import]
 
 import gradio as gr
 from gradio import EventData, Request
@@ -36,6 +36,7 @@ from gradio.utils import (
     get_extension_from_file_path_or_url,
     get_function_description,
     get_function_params,
+    get_heartbeat_rate,
     get_icon_path,
     get_type_hints,
     ipython_check,
@@ -43,6 +44,7 @@ from gradio.utils import (
     is_hosted_notebook,
     is_in_or_equal,
     is_special_typed_parameter,
+    parse_escaped_json,
     safe_aclose_iterator,
     safe_deepcopy,
     sanitize_list_for_csv,
@@ -125,6 +127,38 @@ def test_assert_configs_are_equivalent():
         assert_configs_are_equivalent_besides_ids(xray_config, xray_config_wrong)
 
 
+def test_get_heartbeat_rate(monkeypatch):
+    # Defaults to 15 seconds when nothing is configured.
+    monkeypatch.delenv("GRADIO_HEARTBEAT_INTERVAL", raising=False)
+    monkeypatch.delenv("GRADIO_IS_E2E_TEST", raising=False)
+    assert get_heartbeat_rate() == 15
+
+    # GRADIO_HEARTBEAT_INTERVAL overrides the default with a float value.
+    monkeypatch.setenv("GRADIO_HEARTBEAT_INTERVAL", "1.5")
+    assert get_heartbeat_rate() == 1.5
+
+    # It takes precedence over the GRADIO_IS_E2E_TEST fallback.
+    monkeypatch.setenv("GRADIO_IS_E2E_TEST", "1")
+    assert get_heartbeat_rate() == 1.5
+
+    # Falls back to the E2E rate when only GRADIO_IS_E2E_TEST is set.
+    monkeypatch.delenv("GRADIO_HEARTBEAT_INTERVAL", raising=False)
+    assert get_heartbeat_rate() == 0.25
+
+    # An invalid value warns and falls back to the default.
+    monkeypatch.delenv("GRADIO_IS_E2E_TEST", raising=False)
+    monkeypatch.setenv("GRADIO_HEARTBEAT_INTERVAL", "not-a-number")
+    with pytest.warns(UserWarning):
+        assert get_heartbeat_rate() == 15
+
+    # A zero or negative value would busy-loop asyncio.sleep(), so it warns
+    # and falls back to the default.
+    for bad_value in ("0", "-5"):
+        monkeypatch.setenv("GRADIO_HEARTBEAT_INTERVAL", bad_value)
+        with pytest.warns(UserWarning):
+            assert get_heartbeat_rate() == 15
+
+
 class TestFormatNERList:
     def test_format_ner_list_standard(self):
         string = "Wolfgang lives in Berlin"
@@ -194,6 +228,13 @@ class TestSanitizeForCSV:
             [["=abc", "def", "gh,+ij"], ["abc", "=def", "+ghij"]]
         ) == [["'=abc", "def", "'gh,+ij"], ["abc", "'=def", "'+ghij"]]
         assert sanitize_list_for_csv([1, ["ab", "=de"]]) == [1, ["ab", "'=de"]]
+
+    def test_parse_escaped_json(self):
+        assert parse_escaped_json("-0.5678") == -0.5678
+        # Negative numbers get CSV-escaped with a leading "'" on write (#13591)
+        assert parse_escaped_json("'-0.5678") == -0.5678
+        with pytest.raises(json.JSONDecodeError):
+            parse_escaped_json("'not json")
 
 
 class TestValidateURL:
